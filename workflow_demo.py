@@ -1,0 +1,390 @@
+#!/usr/bin/env python3
+"""
+Qualifire + Elastic Agent Builder Workflows Integration Demo
+===========================================================
+
+This demo shows how to integrate Qualifire safety validation using
+the official Qualifire SDK within Elastic Agent Builder workflows.
+
+This approach is complementary to the API proxy - workflows provide
+flexible, optional validation while the proxy provides guaranteed validation.
+
+Architecture:
+Agent Builder -> Workflow -> Qualifire SDK -> Validation Result
+"""
+
+from typing import Dict, Any, List
+import os
+from dotenv import load_dotenv
+
+# Import official Qualifire SDK
+from qualifire.client import Client as QualifireClient
+from qualifire.types import LLMMessage
+
+# Load environment variables
+load_dotenv()
+
+# Configuration
+QUALIFIRE_API_KEY = os.getenv("QUALIFIRE_API_KEY")
+
+
+class QualifireWorkflowStep:
+    """
+    Qualifire validation step using the official SDK.
+
+    This can be called from Elastic Agent Builder workflows to validate
+    agent responses before returning them to users.
+    """
+
+    def __init__(self, api_key: str):
+        self.client = QualifireClient(api_key=api_key)
+
+        # Policy configurations
+        self.policies = {
+            "default": {
+                "hallucinations_check": True,
+                "content_moderation_check": True,
+                "pii_check": False,
+                "prompt_injections": False,
+                "grounding_check": False,
+                "confidence_threshold": 0.8
+            },
+            "public_facing": {
+                "hallucinations_check": True,
+                "content_moderation_check": True,
+                "pii_check": True,
+                "prompt_injections": True,
+                "grounding_check": False,
+                "confidence_threshold": 0.9
+            },
+            "high_stakes": {
+                "hallucinations_check": True,
+                "content_moderation_check": True,
+                "pii_check": True,
+                "prompt_injections": True,
+                "grounding_check": True,
+                "confidence_threshold": 0.9
+            }
+        }
+
+    def validate_response(
+        self,
+        user_input: str,
+        agent_response: str,
+        policy_name: str = "default",
+        conversation_history: List[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Validate an agent response using the Qualifire SDK with messages format.
+        """
+
+        policy = self.policies.get(policy_name, self.policies["default"])
+
+        # Build messages list
+        messages = []
+
+        # Add conversation history if available
+        if conversation_history:
+            for msg in conversation_history:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role and content:
+                    messages.append(LLMMessage(role=role, content=content))
+
+        # Add current user input and agent response
+        messages.append(LLMMessage(role="user", content=user_input))
+        messages.append(LLMMessage(role="assistant", content=agent_response))
+
+        try:
+            # Call Qualifire SDK with messages format
+            result = self.client.evaluate(
+                messages=messages,
+                hallucinations_check=policy["hallucinations_check"],
+                content_moderation_check=policy["content_moderation_check"],
+                pii_check=policy["pii_check"],
+                prompt_injections=policy["prompt_injections"],
+                grounding_check=policy["grounding_check"],
+            )
+
+            # Parse results
+            overall_score = result.score
+            failed_checks = []
+            check_details = {}
+
+            for eval_result in result.evaluationResults:
+                check_type = eval_result.type
+                check_details[check_type] = []
+
+                for check in eval_result.results:
+                    check_details[check_type].append({
+                        "name": check.name,
+                        "score": check.score,
+                        "flagged": check.flagged,
+                        "label": check.label,
+                        "reason": getattr(check, 'reason', '')
+                    })
+
+                    if check.score < (policy["confidence_threshold"] * 100) or check.flagged:
+                        failed_checks.append({
+                            "check_type": check_type,
+                            "name": check.name,
+                            "score": check.score,
+                            "reason": getattr(check, 'reason', 'Check failed')
+                        })
+
+            # Determine validation status
+            passed = len(failed_checks) == 0 and overall_score >= (policy["confidence_threshold"] * 100)
+
+            if passed:
+                return {
+                    "validation_status": "passed",
+                    "overall_score": overall_score,
+                    "check_details": check_details,
+                    "should_proceed": True,
+                    "final_response": agent_response
+                }
+            else:
+                return {
+                    "validation_status": "blocked",
+                    "overall_score": overall_score,
+                    "check_details": check_details,
+                    "failed_checks": failed_checks,
+                    "should_proceed": False,
+                    "safe_response": self._generate_safe_response(failed_checks),
+                    "reason": failed_checks[0].get("reason", "Safety validation failed") if failed_checks else "Score below threshold"
+                }
+
+        except Exception as e:
+            return {
+                "validation_status": "error",
+                "error": str(e),
+                "should_proceed": False,
+                "safe_response": "I apologize, but I cannot provide a response at this time due to a safety system issue."
+            }
+
+    def _generate_safe_response(self, failed_checks: List[Dict]) -> str:
+        """Generate safe alternative response based on failed checks."""
+
+        if not failed_checks:
+            return "I need to be more careful with my response."
+
+        check_types = [check.get("check_type", "") for check in failed_checks]
+
+        if "hallucinations" in check_types:
+            return "I don't have sufficient reliable information to answer that accurately."
+
+        if "content_moderation" in check_types:
+            return "I can't provide that type of content. How can I help you with something else?"
+
+        if "pii" in check_types:
+            return "I've detected sensitive personal information in my response. Let me provide a safer answer."
+
+        if "prompt_injections" in check_types:
+            return "I noticed something unusual in the request. Let me provide a helpful response while ensuring security."
+
+        if "grounding" in check_types:
+            return "I want to make sure my response is well-grounded in reliable information."
+
+        return "I need to be more careful with my response to ensure accuracy and safety."
+
+
+class ElasticAgentBuilderWorkflowDemo:
+    """
+    Demonstrates how Agent Builder workflows would integrate with Qualifire SDK.
+    """
+
+    def __init__(self):
+        self.qualifire_step = QualifireWorkflowStep(QUALIFIRE_API_KEY)
+
+        # Workflow definitions
+        self.workflows = {
+            "customer_service_validation": {
+                "name": "Customer Service Safety Validation",
+                "description": "Validates customer service responses for safety and compliance",
+                "policy": "public_facing"
+            },
+            "healthcare_validation": {
+                "name": "Healthcare Response Validation",
+                "description": "High-stakes validation for healthcare-related responses",
+                "policy": "high_stakes"
+            },
+            "financial_validation": {
+                "name": "Financial Advice Validation",
+                "description": "Validates responses for financial compliance and safety",
+                "policy": "high_stakes"
+            }
+        }
+
+    def execute_workflow(
+        self,
+        workflow_name: str,
+        user_input: str,
+        agent_response: str,
+        conversation_history: List[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Execute a validation workflow using Qualifire SDK.
+        """
+
+        if workflow_name not in self.workflows:
+            return {
+                "error": f"Workflow '{workflow_name}' not found",
+                "should_proceed": True,
+                "original_response": agent_response
+            }
+
+        workflow = self.workflows[workflow_name]
+
+        print(f"   Executing workflow: {workflow['name']}")
+        print(f"   Description: {workflow['description']}")
+
+        # Execute the validation step using SDK
+        validation_result = self.qualifire_step.validate_response(
+            user_input=user_input,
+            agent_response=agent_response,
+            policy_name=workflow["policy"],
+            conversation_history=conversation_history
+        )
+
+        # Workflow decision logic
+        if validation_result.get("validation_status") == "passed":
+            return {
+                "workflow_status": "completed",
+                "validation_result": validation_result,
+                "should_proceed": True,
+                "final_response": agent_response,
+                "workflow_name": workflow_name
+            }
+        elif validation_result.get("validation_status") == "blocked":
+            return {
+                "workflow_status": "blocked",
+                "validation_result": validation_result,
+                "should_proceed": False,
+                "final_response": validation_result.get("safe_response", "I cannot provide that information."),
+                "workflow_name": workflow_name,
+                "block_reason": validation_result.get("reason", "Response flagged by safety validation")
+            }
+        else:
+            return {
+                "workflow_status": "error",
+                "validation_result": validation_result,
+                "should_proceed": False,
+                "final_response": "I apologize, but I cannot provide a response at this time.",
+                "workflow_name": workflow_name
+            }
+
+
+def demo_workflow_integration():
+    """
+    Demonstrates different workflow scenarios with Qualifire validation.
+    """
+
+    demo = ElasticAgentBuilderWorkflowDemo()
+
+    print("Elastic Agent Builder + Qualifire Workflows Integration Demo")
+    print("Using Official Qualifire Python SDK")
+    print("=" * 65)
+    print()
+    print("This demo shows how Agent Builder workflows can integrate with")
+    print("Qualifire safety validation using the official SDK.")
+    print()
+
+    # Test scenarios
+    scenarios = [
+        {
+            "name": "Safe Customer Service Query",
+            "workflow": "customer_service_validation",
+            "user_input": "What are your business hours?",
+            "agent_response": "Our customer service is available Monday through Friday, 9 AM to 5 PM EST. You can also reach us via email 24/7 at support@company.com.",
+        },
+        {
+            "name": "Potentially Unsafe Financial Advice",
+            "workflow": "financial_validation",
+            "user_input": "What should I invest in?",
+            "agent_response": "I guarantee you'll make 50% returns if you invest in our premium cryptocurrency portfolio. This is a sure thing with zero risk!",
+        },
+        {
+            "name": "Healthcare Information Request",
+            "workflow": "healthcare_validation",
+            "user_input": "I have chest pain. What should I do?",
+            "agent_response": "Based on your symptoms, you should take some aspirin and see if it goes away. Chest pain is usually not serious.",
+        },
+        {
+            "name": "Customer Service with PII",
+            "workflow": "customer_service_validation",
+            "user_input": "Can you help me with my account?",
+            "agent_response": "Sure! I can see your account details. Your Social Security Number is 123-45-6789 and your account balance is $5,432.10. How can I help?",
+        }
+    ]
+
+    for i, scenario in enumerate(scenarios, 1):
+        print(f"\nScenario {i}: {scenario['name']}")
+        print("-" * 50)
+        print(f"User Input: {scenario['user_input']}")
+        print(f"Agent Response: {scenario['agent_response'][:60]}...")
+        print(f"Workflow: {scenario['workflow']}")
+
+        try:
+            result = demo.execute_workflow(
+                workflow_name=scenario["workflow"],
+                user_input=scenario["user_input"],
+                agent_response=scenario["agent_response"]
+            )
+
+            workflow_status = result.get("workflow_status", "unknown")
+
+            if workflow_status == "completed":
+                print("   ✅ Workflow Status: PASSED")
+                print(f"   ✅ Response Approved: {result['final_response'][:60]}...")
+
+                validation = result.get("validation_result", {})
+                if "overall_score" in validation:
+                    print(f"   Score: {validation['overall_score']}/100")
+
+            elif workflow_status == "blocked":
+                print("   ❌ Workflow Status: BLOCKED")
+                print(f"   Safe Response: {result['final_response']}")
+                print(f"   Block Reason: {result.get('block_reason', 'Safety violation')}")
+
+                validation = result.get("validation_result", {})
+                if "failed_checks" in validation:
+                    failed = validation["failed_checks"]
+                    print(f"   Failed Checks: {len(failed)} safety violations detected")
+
+            elif workflow_status == "error":
+                print("   ❌ Workflow Status: ERROR")
+                print(f"   Error Response: {result['final_response']}")
+                validation = result.get("validation_result", {})
+                if "error" in validation:
+                    print(f"   Error Details: {validation['error']}")
+
+        except Exception as e:
+            print(f"   ❌ Workflow Error: {e}")
+
+        print()
+
+    print("Workflow Integration Summary:")
+    print("=" * 40)
+    print("- Uses official Qualifire Python SDK")
+    print("- Messages format for better context understanding")
+    print("- Different workflows for different use cases")
+    print("- Configurable policies and thresholds")
+    print("- Full audit trail and observability")
+
+    print("\nComplementary Approaches:")
+    print("- Workflows: Flexible, optional validation (this demo)")
+    print("- API Proxy: Guaranteed, mandatory validation (see proxy.py)")
+
+
+if __name__ == "__main__":
+    if not QUALIFIRE_API_KEY:
+        print("Error: QUALIFIRE_API_KEY environment variable not set")
+        print("Please set your Qualifire API key in the .env file")
+        exit(1)
+
+    try:
+        demo_workflow_integration()
+    except KeyboardInterrupt:
+        print("\nDemo interrupted by user")
+    except Exception as e:
+        print(f"\nDemo failed: {e}")

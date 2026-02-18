@@ -1,0 +1,180 @@
+# Elastic Agent Builder Workflow Configurations for Qualifire Integration
+# 
+# These are example workflow definitions that customers can import into Agent Builder
+# to integrate Qualifire safety validation via HTTP steps.
+
+workflows:
+  
+  # Basic safety validation for general use cases
+  - name: "qualifire_basic_validation"
+    description: "Basic safety validation using Qualifire guardrails"
+    trigger: "on_agent_response"
+    steps:
+      - name: "validate_response"
+        type: "http"
+        method: "POST"
+        url: "https://api.qualifire.ai/v1/evaluate"
+        headers:
+          Authorization: "Bearer ${QUALIFIRE_API_KEY}"
+          Content-Type: "application/json"
+        body:
+          input: "${user_input}"
+          output: "${agent_response}" 
+          hallucinations_check: true
+          content_moderation_check: true
+        timeout: 5000
+      - name: "decision_logic"
+        type: "conditional"
+        condition: "${validate_response.validation_status} == 'passed'"
+        on_true:
+          - return_response: "${agent_response}"
+        on_false:
+          - return_response: "I need to be more careful with my response to ensure accuracy and safety."
+
+  # High-stakes validation for healthcare, finance, legal
+  - name: "qualifire_high_stakes_validation"
+    description: "Comprehensive validation for regulated industries"
+    trigger: "on_agent_response"
+    steps:
+      - name: "comprehensive_validation"
+        type: "http"
+        method: "POST" 
+        url: "https://api.qualifire.ai/v1/evaluate"
+        headers:
+          Authorization: "Bearer ${QUALIFIRE_API_KEY}"
+          Content-Type: "application/json"
+        body:
+          input: "${user_input}"
+          output: "${agent_response}"
+          hallucinations_check: true
+          grounding_check: true
+          content_moderation_check: true
+          pii_check: true
+          prompt_injections: true
+          tool_use_quality_check: true
+        timeout: 10000
+      - name: "high_stakes_decision"
+        type: "conditional"
+        condition: "${comprehensive_validation.overall_score} >= 90"
+        on_true:
+          - return_response: "${agent_response}"
+        on_false:
+          - name: "generate_safe_response"
+            type: "http"
+            method: "POST"
+            url: "https://api.qualifire.ai/v1/safe_response"
+            headers:
+              Authorization: "Bearer ${QUALIFIRE_API_KEY}"
+              Content-Type: "application/json" 
+            body:
+              failed_checks: "${comprehensive_validation.failed_checks}"
+              context: "${context}"
+          - return_response: "${generate_safe_response.safe_response}"
+
+  # Customer service validation with PII detection
+  - name: "qualifire_customer_service_validation"
+    description: "Customer-facing validation with PII protection"
+    trigger: "on_agent_response"
+    steps:
+      - name: "customer_safety_check"
+        type: "http"
+        method: "POST"
+        url: "https://api.qualifire.ai/v1/evaluate"
+        headers:
+          Authorization: "Bearer ${QUALIFIRE_API_KEY}"
+          Content-Type: "application/json"
+        body:
+          input: "${user_input}"
+          output: "${agent_response}"
+          content_moderation_check: true
+          pii_check: true
+          prompt_injections: true
+        timeout: 3000
+      - name: "customer_decision"
+        type: "conditional"
+        condition: "${customer_safety_check.validation_status} == 'passed'"
+        on_true:
+          - return_response: "${agent_response}"
+        on_false:
+          - name: "log_incident"
+            type: "http"
+            method: "POST"
+            url: "https://api.qualifire.ai/v1/incidents"
+            headers:
+              Authorization: "Bearer ${QUALIFIRE_API_KEY}"
+              Content-Type: "application/json"
+            body:
+              incident_type: "customer_service_block"
+              failed_checks: "${customer_safety_check.failed_checks}"
+              user_session: "${session_id}"
+          - return_response: "I can't provide that information. How else can I help you today?"
+
+  # Financial services compliance validation
+  - name: "qualifire_financial_compliance"
+    description: "Financial advice compliance validation" 
+    trigger: "on_agent_response"
+    steps:
+      - name: "compliance_check"
+        type: "http"
+        method: "POST"
+        url: "https://api.qualifire.ai/v1/evaluate"
+        headers:
+          Authorization: "Bearer ${QUALIFIRE_API_KEY}"
+          Content-Type: "application/json"
+        body:
+          input: "${user_input}"
+          output: "${agent_response}"
+          hallucinations_check: true
+          content_moderation_check: true
+          assertions:
+            - "Must not guarantee investment returns"
+            - "Must include risk disclosures for financial products"
+            - "Must not recommend specific securities without proper disclaimers"
+            - "Must comply with SEC regulations"
+        timeout: 8000
+      - name: "compliance_decision"
+        type: "conditional"
+        condition: "${compliance_check.validation_status} == 'passed'"
+        on_true:
+          - return_response: "${agent_response}"
+        on_false:
+          - name: "compliance_log"
+            type: "http" 
+            method: "POST"
+            url: "https://api.qualifire.ai/v1/compliance_violations"
+            headers:
+              Authorization: "Bearer ${QUALIFIRE_API_KEY}"
+              Content-Type: "application/json"
+            body:
+              violation_type: "financial_compliance"
+              failed_assertions: "${compliance_check.failed_checks}"
+              timestamp: "${timestamp}"
+          - return_response: "I cannot provide financial recommendations. Please consult with a licensed financial advisor for investment advice."
+
+# Configuration for different deployment environments
+environments:
+  development:
+    qualifire_api_url: "https://dev-api.qualifire.ai"
+    validation_timeout: 10000
+    log_level: "debug"
+  
+  staging:
+    qualifire_api_url: "https://staging-api.qualifire.ai" 
+    validation_timeout: 5000
+    log_level: "info"
+    
+  production:
+    qualifire_api_url: "https://api.qualifire.ai"
+    validation_timeout: 3000
+    log_level: "warn"
+
+# Usage instructions for Agent Builder customers:
+# 
+# 1. Import these workflow definitions into Agent Builder
+# 2. Set your QUALIFIRE_API_KEY environment variable  
+# 3. Configure workflows to trigger on agent responses
+# 4. Customize validation policies for your use case
+# 5. Monitor validation results in both Agent Builder and Qualifire dashboards
+#
+# For guaranteed validation that cannot be bypassed, consider the API proxy approach:
+# https://github.com/qualifire-dev/elastic-agent-builder-integration

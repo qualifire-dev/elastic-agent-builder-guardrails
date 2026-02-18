@@ -1,0 +1,15 @@
+# Qualifire + Elastic Agent Builder Proxy Requirements
+
+# Official Qualifire Python SDK
+qualifire==0.15.0
+
+# FastAPI and server dependencies
+fastapi==0.104.1
+uvicorn==0.24.0
+
+# HTTP client
+httpx==0.25.2
+
+# Environment configuration  
+python-dotenv==1.0.0
+requests
