@@ -14,7 +14,7 @@ import logging
 import time
 import traceback
 from typing import Dict, Any, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -45,6 +45,8 @@ class ValidationPolicy:
     prompt_injections: bool = False
     tool_use_quality_check: bool = False
     grounding_multi_turn_mode: bool = False
+    assertions: List[str] = field(default_factory=list)
+    policy_target: str = None
 
 
 class QualifireAPIClient:
@@ -70,7 +72,9 @@ class QualifireAPIClient:
         pii_check: bool = False,
         prompt_injections: bool = False,
         tool_use_quality_check: bool = False,
-        grounding_multi_turn_mode: bool = None
+        grounding_multi_turn_mode: bool = None,
+        assertions: List[str] = None,
+        policy_target: str = None
     ) -> Dict[str, Any]:
         """Call Qualifire evaluation API"""
 
@@ -86,6 +90,12 @@ class QualifireAPIClient:
 
         if grounding_multi_turn_mode is not None:
             payload["grounding_multi_turn_mode"] = grounding_multi_turn_mode
+
+        if assertions:
+            payload["assertions"] = assertions
+
+        if policy_target:
+            payload["policy_target"] = policy_target
 
         response = await self.client.post(
             f"{self.base_url}/api/v1/evaluation/evaluate",
@@ -162,6 +172,39 @@ class ElasticProxy:
                 content_moderation_check=False,
                 pii_check=False,
                 grounding_multi_turn_mode=True
+            ),
+            "legal_financial": ValidationPolicy(
+                name="legal_financial",
+                confidence_threshold=0.9,
+                block_unsafe=True,
+                hallucinations_check=True,
+                content_moderation_check=True,
+                pii_check=True,
+                prompt_injections=False,
+                assertions=[
+                    "The response must not provide specific legal advice",
+                    "The response must not provide specific financial or investment advice",
+                    "The response must recommend consulting a professional for legal or financial matters"
+                ]
+            ),
+            "input_gating": ValidationPolicy(
+                name="input_gating",
+                confidence_threshold=0.9,
+                block_unsafe=True,
+                hallucinations_check=False,
+                content_moderation_check=True,
+                pii_check=False,
+                prompt_injections=True,
+                policy_target="input"
+            ),
+            "strict_content": ValidationPolicy(
+                name="strict_content",
+                confidence_threshold=0.95,
+                block_unsafe=True,
+                hallucinations_check=True,
+                content_moderation_check=True,
+                pii_check=True,
+                prompt_injections=True
             )
         }
 
@@ -202,6 +245,12 @@ class ElasticProxy:
 
     def get_policy(self, context: Dict[str, Any]) -> ValidationPolicy:
         """Select validation policy based on context"""
+
+        # Check for explicit policy override first
+        if context.get("policy_override"):
+            policy_name = context.get("policy_override")
+            if policy_name in self.policies:
+                return self.policies[policy_name]
 
         if context.get("high_risk"):
             return self.policies["high_stakes"]
@@ -258,6 +307,14 @@ class ElasticProxy:
             # Only include grounding_multi_turn_mode when grounding_check is enabled
             if policy.grounding_check and policy.grounding_multi_turn_mode:
                 eval_kwargs["grounding_multi_turn_mode"] = policy.grounding_multi_turn_mode
+
+            # Include assertions if configured
+            if policy.assertions:
+                eval_kwargs["assertions"] = policy.assertions
+
+            # Include policy_target if configured (for input gating)
+            if policy.policy_target:
+                eval_kwargs["policy_target"] = policy.policy_target
 
             result = await self.qualifire_client.evaluate(**eval_kwargs)
 
@@ -403,6 +460,12 @@ class ElasticProxy:
             return (
                 "I want to make sure my response is well-grounded in reliable information. "
                 "Let me provide a more careful answer based on verified facts."
+            )
+
+        if "assertions" in check_types:
+            return (
+                "I'm not able to provide specific advice on this topic. "
+                "Please consult with a qualified professional for personalized guidance."
             )
 
         return (
@@ -645,6 +708,12 @@ async def list_policies():
         if hasattr(policy, "grounding_multi_turn_mode"):
             policy_dict["grounding_multi_turn_mode"] = policy.grounding_multi_turn_mode
 
+        if hasattr(policy, "assertions") and policy.assertions:
+            policy_dict["assertions"] = policy.assertions
+
+        if hasattr(policy, "policy_target") and policy.policy_target:
+            policy_dict["policy_target"] = policy.policy_target
+
         policies[name] = policy_dict
 
     return {"policies": policies}
@@ -669,6 +738,7 @@ async def test_validation():
         return {
             "status": "success",
             "api_working": True,
+            "sdk_working": True,  # Keep for backwards compatibility
             "test_score": result.get("score"),
             "test_status": result.get("status")
         }
@@ -677,6 +747,7 @@ async def test_validation():
         return {
             "status": "error",
             "api_working": False,
+            "sdk_working": False,  # Keep for backwards compatibility
             "error": str(e)
         }
 
