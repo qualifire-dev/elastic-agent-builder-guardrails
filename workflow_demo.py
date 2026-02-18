@@ -4,40 +4,92 @@ Qualifire + Elastic Agent Builder Workflows Integration Demo
 ===========================================================
 
 This demo shows how to integrate Qualifire safety validation using
-the official Qualifire SDK within Elastic Agent Builder workflows.
+direct API calls within Elastic Agent Builder workflows.
 
 This approach is complementary to the API proxy - workflows provide
 flexible, optional validation while the proxy provides guaranteed validation.
 
 Architecture:
-Agent Builder -> Workflow -> Qualifire SDK -> Validation Result
+Agent Builder -> Workflow -> Qualifire API -> Validation Result
 """
 
 from typing import Dict, Any, List
 import os
+import httpx
 from dotenv import load_dotenv
-
-# Import official Qualifire SDK
-from qualifire.client import Client as QualifireClient
-from qualifire.types import LLMMessage
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
 QUALIFIRE_API_KEY = os.getenv("QUALIFIRE_API_KEY")
+QUALIFIRE_API_URL = os.getenv("QUALIFIRE_API_URL", "https://api.qualifire.ai")
+
+
+class QualifireAPIClient:
+    """Direct HTTP client for Qualifire API"""
+
+    def __init__(self, api_key: str, base_url: str = None):
+        self.api_key = api_key
+        self.base_url = (base_url or QUALIFIRE_API_URL).rstrip("/")
+        self.client = httpx.Client(
+            timeout=30.0,
+            headers={
+                "X-Qualifire-API-Key": api_key,
+                "Content-Type": "application/json"
+            }
+        )
+
+    def evaluate(
+        self,
+        messages: List[Dict[str, str]],
+        hallucinations_check: bool = False,
+        grounding_check: bool = False,
+        content_moderation_check: bool = False,
+        pii_check: bool = False,
+        prompt_injections: bool = False,
+        tool_use_quality_check: bool = False,
+        grounding_multi_turn_mode: bool = None
+    ) -> Dict[str, Any]:
+        """Call Qualifire evaluation API"""
+
+        payload = {
+            "messages": messages,
+            "hallucinations_check": hallucinations_check,
+            "grounding_check": grounding_check,
+            "content_moderation_check": content_moderation_check,
+            "pii_check": pii_check,
+            "prompt_injections": prompt_injections,
+            "tool_use_quality_check": tool_use_quality_check,
+        }
+
+        if grounding_multi_turn_mode is not None:
+            payload["grounding_multi_turn_mode"] = grounding_multi_turn_mode
+
+        response = self.client.post(
+            f"{self.base_url}/api/v1/evaluation/evaluate",
+            json=payload
+        )
+
+        if response.status_code != 200:
+            raise Exception(f"Qualifire API error {response.status_code}: {response.text}")
+
+        return response.json()
+
+    def close(self):
+        self.client.close()
 
 
 class QualifireWorkflowStep:
     """
-    Qualifire validation step using the official SDK.
+    Qualifire validation step using direct API calls.
 
     This can be called from Elastic Agent Builder workflows to validate
     agent responses before returning them to users.
     """
 
     def __init__(self, api_key: str):
-        self.client = QualifireClient(api_key=api_key)
+        self.client = QualifireAPIClient(api_key=api_key)
 
         # Policy configurations
         self.policies = {
@@ -75,7 +127,7 @@ class QualifireWorkflowStep:
         conversation_history: List[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """
-        Validate an agent response using the Qualifire SDK with messages format.
+        Validate an agent response using the Qualifire API with messages format.
         """
 
         policy = self.policies.get(policy_name, self.policies["default"])
@@ -89,14 +141,14 @@ class QualifireWorkflowStep:
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
                 if role and content:
-                    messages.append(LLMMessage(role=role, content=content))
+                    messages.append({"role": role, "content": content})
 
         # Add current user input and agent response
-        messages.append(LLMMessage(role="user", content=user_input))
-        messages.append(LLMMessage(role="assistant", content=agent_response))
+        messages.append({"role": "user", "content": user_input})
+        messages.append({"role": "assistant", "content": agent_response})
 
         try:
-            # Call Qualifire SDK with messages format
+            # Call Qualifire API with messages format
             result = self.client.evaluate(
                 messages=messages,
                 hallucinations_check=policy["hallucinations_check"],
@@ -107,29 +159,30 @@ class QualifireWorkflowStep:
             )
 
             # Parse results
-            overall_score = result.score
+            overall_score = result.get("score") or 0
             failed_checks = []
             check_details = {}
 
-            for eval_result in result.evaluationResults:
-                check_type = eval_result.type
+            for eval_result in result.get("evaluationResults", []):
+                check_type = eval_result.get("type", "unknown")
                 check_details[check_type] = []
 
-                for check in eval_result.results:
+                for check in eval_result.get("results", []):
                     check_details[check_type].append({
-                        "name": check.name,
-                        "score": check.score,
-                        "flagged": check.flagged,
-                        "label": check.label,
-                        "reason": getattr(check, 'reason', '')
+                        "name": check.get("name", ""),
+                        "score": check.get("score", 0),
+                        "flagged": check.get("flagged", False),
+                        "label": check.get("label", ""),
+                        "reason": check.get("reason", "")
                     })
 
-                    if check.score < (policy["confidence_threshold"] * 100) or check.flagged:
+                    check_score = check.get("score", 0)
+                    if check_score < (policy["confidence_threshold"] * 100) or check.get("flagged", False):
                         failed_checks.append({
                             "check_type": check_type,
-                            "name": check.name,
-                            "score": check.score,
-                            "reason": getattr(check, 'reason', 'Check failed')
+                            "name": check.get("name", ""),
+                            "score": check_score,
+                            "reason": check.get("reason", "Check failed")
                         })
 
             # Determine validation status
@@ -190,7 +243,7 @@ class QualifireWorkflowStep:
 
 class ElasticAgentBuilderWorkflowDemo:
     """
-    Demonstrates how Agent Builder workflows would integrate with Qualifire SDK.
+    Demonstrates how Agent Builder workflows would integrate with Qualifire API.
     """
 
     def __init__(self):
@@ -223,7 +276,7 @@ class ElasticAgentBuilderWorkflowDemo:
         conversation_history: List[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """
-        Execute a validation workflow using Qualifire SDK.
+        Execute a validation workflow using Qualifire API.
         """
 
         if workflow_name not in self.workflows:
@@ -238,7 +291,7 @@ class ElasticAgentBuilderWorkflowDemo:
         print(f"   Executing workflow: {workflow['name']}")
         print(f"   Description: {workflow['description']}")
 
-        # Execute the validation step using SDK
+        # Execute the validation step using API
         validation_result = self.qualifire_step.validate_response(
             user_input=user_input,
             agent_response=agent_response,
@@ -282,11 +335,11 @@ def demo_workflow_integration():
     demo = ElasticAgentBuilderWorkflowDemo()
 
     print("Elastic Agent Builder + Qualifire Workflows Integration Demo")
-    print("Using Official Qualifire Python SDK")
+    print("Using Direct Qualifire API Calls")
     print("=" * 65)
     print()
     print("This demo shows how Agent Builder workflows can integrate with")
-    print("Qualifire safety validation using the official SDK.")
+    print("Qualifire safety validation using the direct API.")
     print()
 
     # Test scenarios
@@ -365,7 +418,7 @@ def demo_workflow_integration():
 
     print("Workflow Integration Summary:")
     print("=" * 40)
-    print("- Uses official Qualifire Python SDK")
+    print("- Uses direct Qualifire API calls")
     print("- Messages format for better context understanding")
     print("- Different workflows for different use cases")
     print("- Configurable policies and thresholds")

@@ -4,12 +4,11 @@ Qualifire + Elastic Agent Builder Proxy
 =======================================
 
 API proxy that intercepts all Elastic Agent Builder responses
-and validates them through Qualifire guardrails using the official SDK.
+and validates them through Qualifire guardrails using direct API calls.
 
 This ensures NO response can bypass validation.
 """
 
-import asyncio
 import json
 import logging
 import time
@@ -26,12 +25,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
 
-# Import official Qualifire SDK
-from qualifire.client import Client as QualifireClient
-from qualifire.types import LLMMessage
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Qualifire API configuration
+QUALIFIRE_API_URL = os.getenv("QUALIFIRE_API_URL", "https://api.qualifire.ai")
 
 
 @dataclass
@@ -40,15 +38,68 @@ class ValidationPolicy:
     name: str
     confidence_threshold: float = 0.8
     block_unsafe: bool = True
-    # Qualifire SDK check configurations
     hallucinations_check: bool = True
     grounding_check: bool = False
     content_moderation_check: bool = True
     pii_check: bool = False
     prompt_injections: bool = False
     tool_use_quality_check: bool = False
-    # Multi-turn conversation settings
     grounding_multi_turn_mode: bool = False
+
+
+class QualifireAPIClient:
+    """Direct HTTP client for Qualifire API"""
+
+    def __init__(self, api_key: str, base_url: str = None):
+        self.api_key = api_key
+        self.base_url = (base_url or QUALIFIRE_API_URL).rstrip("/")
+        self.client = httpx.AsyncClient(
+            timeout=30.0,
+            headers={
+                "X-Qualifire-API-Key": api_key,
+                "Content-Type": "application/json"
+            }
+        )
+
+    async def evaluate(
+        self,
+        messages: List[Dict[str, str]],
+        hallucinations_check: bool = False,
+        grounding_check: bool = False,
+        content_moderation_check: bool = False,
+        pii_check: bool = False,
+        prompt_injections: bool = False,
+        tool_use_quality_check: bool = False,
+        grounding_multi_turn_mode: bool = None
+    ) -> Dict[str, Any]:
+        """Call Qualifire evaluation API"""
+
+        payload = {
+            "messages": messages,
+            "hallucinations_check": hallucinations_check,
+            "grounding_check": grounding_check,
+            "content_moderation_check": content_moderation_check,
+            "pii_check": pii_check,
+            "prompt_injections": prompt_injections,
+            "tool_use_quality_check": tool_use_quality_check,
+        }
+
+        if grounding_multi_turn_mode is not None:
+            payload["grounding_multi_turn_mode"] = grounding_multi_turn_mode
+
+        response = await self.client.post(
+            f"{self.base_url}/api/v1/evaluation/evaluate",
+            json=payload
+        )
+
+        if response.status_code != 200:
+            error_text = response.text
+            raise Exception(f"Qualifire API error {response.status_code}: {error_text}")
+
+        return response.json()
+
+    async def close(self):
+        await self.client.aclose()
 
 
 class ElasticProxy:
@@ -58,8 +109,8 @@ class ElasticProxy:
         self.kibana_url = kibana_url.rstrip("/")
         self.elastic_api_key = elastic_api_key
 
-        # Initialize official Qualifire client
-        self.qualifire_client = QualifireClient(api_key=qualifire_api_key)
+        # Initialize Qualifire API client
+        self.qualifire_client = QualifireAPIClient(api_key=qualifire_api_key)
 
         # HTTP client for Elastic API
         self.elastic_client = httpx.AsyncClient(
@@ -71,7 +122,7 @@ class ElasticProxy:
             }
         )
 
-        # Validation policies using Qualifire SDK checks
+        # Validation policies
         self.policies = {
             "default": ValidationPolicy(
                 name="default",
@@ -90,7 +141,7 @@ class ElasticProxy:
                 pii_check=True,
                 prompt_injections=True,
                 tool_use_quality_check=False,
-                grounding_multi_turn_mode=True  # Enable multi-turn for high-stakes
+                grounding_multi_turn_mode=True
             ),
             "public_facing": ValidationPolicy(
                 name="public_facing",
@@ -100,29 +151,30 @@ class ElasticProxy:
                 pii_check=True,
                 prompt_injections=True,
                 tool_use_quality_check=False,
-                grounding_multi_turn_mode=True  # Enable multi-turn for public-facing
+                grounding_multi_turn_mode=True
             ),
             "research_mode": ValidationPolicy(
                 name="research_mode",
                 confidence_threshold=0.7,
-                block_unsafe=False,  # Allow flagged responses for research
+                block_unsafe=False,
                 hallucinations_check=True,
                 grounding_check=True,
                 content_moderation_check=False,
                 pii_check=False,
-                grounding_multi_turn_mode=True  # Enable multi-turn for research
+                grounding_multi_turn_mode=True
             )
         }
 
     async def close(self):
         await self.elastic_client.aclose()
+        await self.qualifire_client.close()
 
     def build_conversation_messages(
         self,
         user_input: str,
         agent_response: str,
         request_data: Dict[str, Any]
-    ) -> List[LLMMessage]:
+    ) -> List[Dict[str, str]]:
         """Build conversation messages from Agent Builder request"""
 
         messages = []
@@ -130,7 +182,7 @@ class ElasticProxy:
         # Add system message if present
         system_prompt = request_data.get("system_prompt")
         if system_prompt:
-            messages.append(LLMMessage(role="system", content=system_prompt))
+            messages.append({"role": "system", "content": system_prompt})
 
         # Add conversation history if available
         conversation_history = request_data.get("conversation_history", [])
@@ -138,13 +190,13 @@ class ElasticProxy:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             if role and content:
-                messages.append(LLMMessage(role=role, content=content))
+                messages.append({"role": role, "content": content})
 
         # Add current user input
-        messages.append(LLMMessage(role="user", content=user_input))
+        messages.append({"role": "user", "content": user_input})
 
         # Add agent response
-        messages.append(LLMMessage(role="assistant", content=agent_response))
+        messages.append({"role": "assistant", "content": agent_response})
 
         return messages
 
@@ -174,7 +226,7 @@ class ElasticProxy:
         context: Dict[str, Any],
         request_data: Dict[str, Any] = None
     ) -> Dict[str, Any]:
-        """Validate agent response through Qualifire SDK using messages format"""
+        """Validate agent response through Qualifire API using messages format"""
 
         if not response_text.strip():
             return {"response": response_text, "validation_applied": False}
@@ -190,7 +242,6 @@ class ElasticProxy:
                 request_data=request_data or {}
             )
 
-            # Always use messages format for conversation context
             logger.info(f"Using messages format with {len(messages)} messages")
 
             # Build evaluation kwargs
@@ -208,39 +259,40 @@ class ElasticProxy:
             if policy.grounding_check and policy.grounding_multi_turn_mode:
                 eval_kwargs["grounding_multi_turn_mode"] = policy.grounding_multi_turn_mode
 
-            result = self.qualifire_client.evaluate(**eval_kwargs)
+            result = await self.qualifire_client.evaluate(**eval_kwargs)
 
             validation_time = (time.time() - start_time) * 1000
 
-            # Parse results from Qualifire SDK
-            overall_score = result.score
+            # Parse results from Qualifire API
+            overall_score = result.get("score") or 0
             failed_checks = []
             check_details = {}
 
             # Process evaluation results
-            for eval_result in result.evaluationResults:
-                check_type = eval_result.type
+            for eval_result in result.get("evaluationResults", []):
+                check_type = eval_result.get("type", "unknown")
                 check_details[check_type] = []
 
-                for check in eval_result.results:
+                for check in eval_result.get("results", []):
                     check_details[check_type].append({
-                        "name": check.name,
-                        "score": check.score,
-                        "flagged": check.flagged,
-                        "label": check.label,
-                        "reason": getattr(check, 'reason', ''),
-                        "confidence_score": getattr(check, 'confidence_score', None)
+                        "name": check.get("name", ""),
+                        "score": check.get("score", 0),
+                        "flagged": check.get("flagged", False),
+                        "label": check.get("label", ""),
+                        "reason": check.get("reason", ""),
+                        "confidence_score": check.get("confidence_score")
                     })
 
                     # Check if this failed based on score and policy threshold
-                    if check.score < (policy.confidence_threshold * 100) or check.flagged:
+                    check_score = check.get("score", 0)
+                    if check_score < (policy.confidence_threshold * 100) or check.get("flagged", False):
                         failed_checks.append({
                             "check_type": check_type,
-                            "name": check.name,
-                            "score": check.score,
-                            "flagged": check.flagged,
-                            "reason": getattr(check, 'reason', 'Check failed'),
-                            "label": check.label
+                            "name": check.get("name", ""),
+                            "score": check_score,
+                            "flagged": check.get("flagged", False),
+                            "reason": check.get("reason", "Check failed"),
+                            "label": check.get("label", "")
                         })
 
             # Determine if response should be blocked
@@ -287,7 +339,7 @@ class ElasticProxy:
             logger.error(f"Qualifire validation failed: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             validation_time = (time.time() - start_time) * 1000
-            
+
             # On validation error, apply safe default behavior
             error_metadata = {
                 "validation_applied": True,
@@ -316,11 +368,8 @@ class ElasticProxy:
         if not failed_checks:
             return "I need to be more careful with my response to ensure safety and accuracy."
 
-        # Get the primary failure types
         check_types = [check.get("check_type", "") for check in failed_checks]
-        reasons = [check.get("reason", "") for check in failed_checks if check.get("reason")]
 
-        # Generate appropriate safe response based on check types
         if "hallucinations" in check_types:
             return (
                 "I don't have sufficient reliable information to answer that accurately. "
@@ -356,7 +405,6 @@ class ElasticProxy:
                 "Let me provide a more careful answer based on verified facts."
             )
 
-        # Generic safe response
         return (
             "I need to be more careful with my response to ensure accuracy and safety. "
             "How can I better help you with your request?"
@@ -390,11 +438,9 @@ class ElasticProxy:
         if isinstance(response, str):
             return response
         if isinstance(response, dict):
-            # Try common keys for text content
             for key in ["content", "text", "message", "output"]:
                 if key in response and isinstance(response[key], str):
                     return response[key]
-            # Log the structure if we can't find text
             logger.warning(f"Could not extract text from response dict: {list(response.keys())}")
             return json.dumps(response)
         return str(response) if response else ""
@@ -426,23 +472,21 @@ class ElasticProxy:
                 logger.error(f"Error extracting response: {e}")
                 logger.error(f"Response data: {response_data}")
                 logger.error(f"Traceback: {traceback.format_exc()}")
-                # Return original response without validation
                 return JSONResponse(content=response_data, status_code=elastic_response["status_code"])
 
             if agent_response:
-                # Validate response using Qualifire SDK
+                # Validate response using Qualifire API
                 validation_result = await self.validate_response(
                     response_text=agent_response,
                     user_input=request_data.get("input", ""),
                     agent_id=request_data.get("agent_id", "unknown"),
                     context=context,
-                    request_data=request_data  # Pass full request data for conversation context
+                    request_data=request_data
                 )
 
                 # Update response with validated content, preserving original structure
                 validated_text = validation_result["response"]
                 if isinstance(raw_response, dict):
-                    # Preserve dict structure, update the text content
                     for key in ["content", "text", "message", "output"]:
                         if key in raw_response:
                             raw_response[key] = validated_text
@@ -457,7 +501,6 @@ class ElasticProxy:
 
             return JSONResponse(content=response_data, status_code=elastic_response["status_code"])
 
-        # Return non-JSON response as-is
         return Response(
             content=elastic_response["content"],
             status_code=elastic_response["status_code"],
@@ -468,7 +511,7 @@ class ElasticProxy:
 # FastAPI app
 app = FastAPI(
     title="Qualifire + Elastic Agent Builder Proxy",
-    description="Guaranteed guardrail validation for all Agent Builder responses using official Qualifire SDK",
+    description="Guaranteed guardrail validation for all Agent Builder responses using Qualifire API",
     version="1.0.0"
 )
 
@@ -488,10 +531,8 @@ proxy: Optional[ElasticProxy] = None
 async def startup():
     global proxy
 
-    # Load environment variables from .env file
     load_dotenv()
 
-    # Load config from environment
     qualifire_api_key = os.getenv("QUALIFIRE_API_KEY")
     kibana_url = os.getenv("KIBANA_URL")
     elastic_api_key = os.getenv("ELASTIC_API_KEY")
@@ -503,7 +544,7 @@ async def startup():
 
     proxy = ElasticProxy(kibana_url, elastic_api_key, qualifire_api_key)
 
-    logger.info("🛡️  Qualifire proxy started with official SDK - all responses will be validated")
+    logger.info("Qualifire proxy started with direct API calls - all responses will be validated")
 
 
 @app.on_event("shutdown")
@@ -518,7 +559,7 @@ async def health():
     return {
         "status": "healthy",
         "service": "qualifire-elastic-proxy",
-        "sdk_version": "official",
+        "api_version": "v1",
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -532,10 +573,8 @@ async def converse_with_validation(request: Request):
 
     request_data = await request.json()
 
-    # Build validation context from headers
     context = {}
 
-    # Policy selection headers
     if request.headers.get("x-high-risk") == "true":
         context["high_risk"] = True
     if request.headers.get("x-public-facing") == "true":
@@ -543,11 +582,9 @@ async def converse_with_validation(request: Request):
     if request.headers.get("x-research-mode") == "true":
         context["research_mode"] = True
 
-    # Domain-specific headers
     if request.headers.get("x-domain"):
         context["domain"] = request.headers.get("x-domain")
 
-    # Custom policy override (if you want to support this)
     if request.headers.get("x-qualifire-policy"):
         policy_name = request.headers.get("x-qualifire-policy")
         if policy_name in proxy.policies:
@@ -558,7 +595,7 @@ async def converse_with_validation(request: Request):
 
 @app.api_route("/api/agent_builder/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def proxy_other_endpoints(path: str, request: Request):
-    """Proxy all other Agent Builder endpoints (tools, agents, etc.) without validation"""
+    """Proxy all other Agent Builder endpoints without validation"""
 
     if not proxy:
         raise HTTPException(status_code=503, detail="Proxy not ready")
@@ -590,7 +627,6 @@ async def list_policies():
 
     policies = {}
     for name, policy in proxy.policies.items():
-        # Convert policy to dict for JSON response
         policy_dict = {
             "name": policy.name,
             "confidence_threshold": policy.confidence_threshold,
@@ -598,7 +634,6 @@ async def list_policies():
             "enabled_checks": {}
         }
 
-        # Add enabled checks
         checks = [
             "hallucinations_check", "grounding_check", "content_moderation_check",
             "pii_check", "prompt_injections", "tool_use_quality_check"
@@ -607,7 +642,6 @@ async def list_policies():
             if hasattr(policy, check):
                 policy_dict["enabled_checks"][check] = getattr(policy, check)
 
-        # Add multi-turn settings
         if hasattr(policy, "grounding_multi_turn_mode"):
             policy_dict["grounding_multi_turn_mode"] = policy.grounding_multi_turn_mode
 
@@ -618,32 +652,31 @@ async def list_policies():
 
 @app.get("/validate/test")
 async def test_validation():
-    """Test endpoint to verify Qualifire SDK integration"""
+    """Test endpoint to verify Qualifire API integration"""
 
     if not proxy:
         raise HTTPException(status_code=503, detail="Proxy not ready")
 
     try:
-        # Simple test validation using messages format
-        result = proxy.qualifire_client.evaluate(
+        result = await proxy.qualifire_client.evaluate(
             messages=[
-                LLMMessage(role="user", content="What is 2+2?"),
-                LLMMessage(role="assistant", content="2+2 equals 4.")
+                {"role": "user", "content": "What is 2+2?"},
+                {"role": "assistant", "content": "2+2 equals 4."}
             ],
             hallucinations_check=True
         )
 
         return {
             "status": "success",
-            "sdk_working": True,
-            "test_score": result.score,
-            "test_status": result.status
+            "api_working": True,
+            "test_score": result.get("score"),
+            "test_status": result.get("status")
         }
 
     except Exception as e:
         return {
             "status": "error",
-            "sdk_working": False,
+            "api_working": False,
             "error": str(e)
         }
 

@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Qualifire](https://img.shields.io/badge/Qualifire-Official%20SDK-green.svg)](https://github.com/qualifire-dev/qualifire-python-sdk)
+[![Qualifire API](https://img.shields.io/badge/Qualifire-API%20v1-green.svg)](https://docs.qualifire.ai)
 
 **Guaranteed AI safety validation for all Elastic Agent Builder responses using Qualifire's real-time guardrails.**
 
@@ -10,7 +10,7 @@ This integration provides a production-ready API proxy that ensures **no AI resp
 
 ---
 
-## 🎯 **Problem Solved**
+## Problem Solved
 
 **Without this integration:**
 - AI responses can contain hallucinations, unsafe content, or PII
@@ -19,38 +19,45 @@ This integration provides a production-ready API proxy that ensures **no AI resp
 - Enterprise compliance requirements not met
 
 **With this integration:**
-- ✅ **100% validation coverage** - every response is checked
-- ✅ **Cannot be bypassed** - proxy intercepts at network level  
-- ✅ **Production-ready** - enterprise deployment options
-- ✅ **Comprehensive safety** - full Qualifire check suite
+- **100% validation coverage** - every response is checked
+- **Cannot be bypassed** - proxy intercepts at network level
+- **Production-ready** - enterprise deployment options
+- **Comprehensive safety** - full Qualifire check suite
+- **Messages format** - better context understanding for multi-turn conversations
 
-## 🏗️ **Architecture**
+## Architecture
 
 ```
-Your Application → Qualifire Proxy → Elastic Agent Builder → Qualifire SDK → Validated Response
+Your Application --> Qualifire Proxy --> Elastic Agent Builder
+                          |
+                          v
+                    Qualifire API (/api/v1/evaluation/evaluate)
+                          |
+                          v
+                    Validated Response
 ```
 
-The proxy transparently intercepts all Agent Builder API calls, validates responses through Qualifire's official SDK, and returns safe content with detailed validation metadata.
+The proxy transparently intercepts all Agent Builder API calls, validates responses through Qualifire's evaluation API using the messages format, and returns safe content with detailed validation metadata.
 
-## 🔄 **Two Integration Approaches**
+## Two Integration Approaches
 
 This repository provides **complementary integration options** for different use cases:
 
-### **API Proxy (Guaranteed Validation)**
-- ✅ **Cannot be bypassed** - Network-level interception
-- ✅ **100% validation coverage** - Every response validated
-- ✅ **Enterprise-grade** - Perfect for regulated industries
-- 🎯 **Use when**: You need guaranteed safety with zero bypass possibility
+### API Proxy (Guaranteed Validation)
+- **Cannot be bypassed** - Network-level interception
+- **100% validation coverage** - Every response validated
+- **Enterprise-grade** - Perfect for regulated industries
+- **Use when**: You need guaranteed safety with zero bypass possibility
 
-### **Workflows Integration (Flexible Validation)** 
-- ✅ **Agent Builder workflows** - Uses HTTP steps natively
-- ✅ **Flexible validation** - Agents choose when to validate
-- ✅ **Easy configuration** - Simple workflow definitions
-- 🎯 **Use when**: You want optional, configurable validation
+### Workflows Integration (Flexible Validation)
+- **Agent Builder workflows** - Direct API calls from workflows
+- **Flexible validation** - Agents choose when to validate
+- **Easy configuration** - Simple workflow definitions
+- **Use when**: You want optional, configurable validation
 
-Both use the official Qualifire Python SDK and can serve different customer segments.
+Both use direct Qualifire API calls with the messages format for better context understanding.
 
-## ⚡ **Quick Start**
+## Quick Start
 
 ### 1. Install Dependencies
 ```bash
@@ -61,8 +68,18 @@ pip install -r requirements.txt
 
 ### 2. Configure Environment
 ```bash
-cp .env.template .env
+cp env-template.txt .env
 # Edit .env with your API keys
+```
+
+Required environment variables:
+```env
+QUALIFIRE_API_KEY=your_qualifire_api_key
+KIBANA_URL=https://your-deployment.kb.region.aws.elastic.cloud
+ELASTIC_API_KEY=your_elastic_api_key
+
+# Optional
+QUALIFIRE_API_URL=https://api.qualifire.ai
 ```
 
 ### 3. Start Proxy
@@ -74,8 +91,8 @@ python proxy.py
 
 **API Proxy Demo (Guaranteed Validation):**
 ```bash
-python proxy.py    # Start the proxy server
-python demo.py     # Test guaranteed validation
+python proxy.py    # Start the proxy server (in one terminal)
+python demo.py     # Test guaranteed validation (in another terminal)
 ```
 
 **Workflows Demo (Flexible Validation):**
@@ -83,23 +100,24 @@ python demo.py     # Test guaranteed validation
 python workflow_demo.py    # Test workflow-based validation
 ```
 
-**That's it!** You can now see both integration approaches in action.
+## Safety Features
 
-## 🛡️ **Safety Features**
-
-### Comprehensive Validation Checks
-- **🧠 Hallucination Detection** - Prevents factual inaccuracies
-- **🛡️ Content Moderation** - Blocks harmful/inappropriate content  
-- **🔒 PII Detection** - Protects personal information
-- **⚡ Prompt Injection Prevention** - Prevents security exploits
-- **📊 Tool Use Quality** - Validates function call quality
-- **📋 Grounding Verification** - Ensures context-appropriate responses
+### Validation Checks
+- **Hallucination Detection** - Prevents factual inaccuracies
+- **Content Moderation** - Blocks harmful/inappropriate content
+- **PII Detection** - Protects personal information
+- **Prompt Injection Prevention** - Prevents security exploits
+- **Tool Use Quality** - Validates function call quality
+- **Grounding Verification** - Ensures context-appropriate responses
 
 ### Built-in Safety Policies
-- **Default**: Hallucinations + Content Moderation (80% threshold)
-- **High-Stakes**: All checks enabled (90% threshold) - for healthcare/finance/legal
-- **Public-Facing**: Content + PII + Toxicity focused (90% threshold)  
-- **Research**: Lower thresholds, allows flagged responses for analysis
+
+| Policy | Threshold | Checks Enabled | Use Case |
+|--------|-----------|----------------|----------|
+| `default` | 80% | Hallucinations, Content Moderation | General use |
+| `high_stakes` | 90% | All checks + Grounding | Healthcare, Finance, Legal |
+| `public_facing` | 90% | Hallucinations, Content, PII, Prompt Injection | Customer-facing apps |
+| `research_mode` | 70% | Hallucinations, Grounding (non-blocking) | Analysis and testing |
 
 ### Policy Selection
 ```bash
@@ -109,11 +127,36 @@ curl -H "X-High-Risk: true" http://localhost:8000/api/agent_builder/converse
 # Use public-facing validation
 curl -H "X-Public-Facing: true" http://localhost:8000/api/agent_builder/converse
 
-# Specify domain for automatic policy selection  
+# Specify domain for automatic policy selection
 curl -H "X-Domain: healthcare" http://localhost:8000/api/agent_builder/converse
 ```
 
-## 📊 **Response Format**
+## Messages Format
+
+The integration uses Qualifire's messages format for better context understanding:
+
+```json
+{
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "What is Elasticsearch?"},
+    {"role": "assistant", "content": "Elasticsearch is a distributed search engine..."},
+    {"role": "user", "content": "How does indexing work?"},
+    {"role": "assistant", "content": "The response to validate..."}
+  ],
+  "hallucinations_check": true,
+  "content_moderation_check": true,
+  "pii_check": true
+}
+```
+
+This provides:
+- Better conversation context understanding
+- Multi-turn dialogue validation
+- More accurate hallucination detection
+- Improved grounding checks
+
+## Response Format
 
 Every validated response includes comprehensive safety metadata:
 
@@ -125,6 +168,8 @@ Every validated response includes comprehensive safety metadata:
     "policy_applied": "default",
     "overall_score": 95,
     "validation_time_ms": 15.3,
+    "format_used": "messages",
+    "message_count": 2,
     "check_details": {
       "hallucinations": [{
         "name": "hallucination_check",
@@ -138,9 +183,14 @@ Every validated response includes comprehensive safety metadata:
 }
 ```
 
-## 🚀 **Production Deployment**
+## Production Deployment
 
 ### Docker
+```bash
+docker-compose up -d
+```
+
+Or build manually:
 ```dockerfile
 FROM python:3.9-slim
 WORKDIR /app
@@ -175,32 +225,39 @@ spec:
             secretKeyRef:
               name: qualifire-secrets
               key: api-key
+        - name: KIBANA_URL
+          valueFrom:
+            secretKeyRef:
+              name: elastic-secrets
+              key: kibana-url
+        - name: ELASTIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: elastic-secrets
+              key: api-key
 ```
 
-### Load Balancing
-Deploy multiple proxy instances behind a load balancer for high availability and scale.
-
-## 📈 **Performance**
+## Performance
 
 - **Validation Latency**: 15-50ms (Qualifire's optimized models)
-- **Proxy Overhead**: ~1-2ms  
+- **Proxy Overhead**: ~1-2ms
 - **Throughput**: Scales horizontally with multiple instances
 - **Availability**: 99.9%+ with proper deployment
 
-## 🔧 **API Endpoints**
+## API Endpoints
 
 ### Validated Endpoints
 - `POST /api/agent_builder/converse` - Chat with guaranteed validation
 
-### Management Endpoints  
+### Management Endpoints
 - `GET /health` - Proxy health check
 - `GET /policies` - List available validation policies
-- `GET /validate/test` - Test Qualifire SDK integration
+- `GET /validate/test` - Test Qualifire API integration
 
 ### Pass-Through Endpoints
 - All other Agent Builder APIs (`/agents`, `/tools`, etc.) work normally
 
-## 🎯 **Use Cases**
+## Use Cases
 
 ### Healthcare
 ```python
@@ -212,7 +269,7 @@ response = requests.post(proxy_url, json=query, headers=headers)
 ### Customer Support
 ```python
 # Uses public-facing policy with PII detection
-headers = {"X-Public-Facing": "true"}  
+headers = {"X-Public-Facing": "true"}
 response = requests.post(proxy_url, json=query, headers=headers)
 ```
 
@@ -223,18 +280,31 @@ headers = {"X-High-Risk": "true", "X-Domain": "finance"}
 response = requests.post(proxy_url, json=query, headers=headers)
 ```
 
-## 🛠️ **Configuration**
+### Multi-turn Conversations
+```python
+# Include conversation history for better context
+payload = {
+    "input": "And what about performance?",
+    "agent_id": "my-agent",
+    "conversation_history": [
+        {"role": "user", "content": "What is Elasticsearch?"},
+        {"role": "assistant", "content": "Elasticsearch is a distributed search engine..."}
+    ]
+}
+response = requests.post(proxy_url, json=payload, headers=headers)
+```
+
+## Configuration
 
 ### Environment Variables
 ```env
 # Required
 QUALIFIRE_API_KEY=your_qualifire_api_key
-KIBANA_URL=https://your-deployment.kb.region.aws.elastic.cloud  
+KIBANA_URL=https://your-deployment.kb.region.aws.elastic.cloud
 ELASTIC_API_KEY=your_elastic_api_key
 
 # Optional
-QUALIFIRE_BASE_URL=https://api.qualifire.ai
-DEBUG=true
+QUALIFIRE_API_URL=https://api.qualifire.ai
 ```
 
 ### Custom Policies
@@ -247,35 +317,63 @@ self.policies["custom"] = ValidationPolicy(
     hallucinations_check=True,
     content_moderation_check=True,
     pii_check=True,
-    # Configure any Qualifire checks
+    prompt_injections=True,
+    grounding_check=False,
+    grounding_multi_turn_mode=False
 )
 ```
 
-## 📋 **Requirements**
+## Files
+
+| File | Description |
+|------|-------------|
+| `proxy.py` | Main proxy server with guaranteed validation |
+| `demo.py` | Demo script for testing the proxy |
+| `workflow_demo.py` | Demo for workflow-based validation |
+| `requirements.txt` | Python dependencies |
+| `docker-compose.yml` | Docker deployment configuration |
+| `env-template.txt` | Environment variables template |
+
+## Requirements
 
 - **Python**: 3.8+
 - **Qualifire Account**: Get API key from [app.qualifire.ai](https://app.qualifire.ai)
-- **Elastic Cloud**: Agent Builder enabled deployment  
-- **Dependencies**: Listed in `requirements.txt`
+- **Elastic Cloud**: Agent Builder enabled deployment
+- **Dependencies**: `httpx`, `fastapi`, `uvicorn`, `python-dotenv`
 
-## 🧪 **Testing**
+## Testing
 
 ```bash
-# Run comprehensive demo
+# Run proxy demo
 python demo.py
 
-# Test specific policies
-python -c "
-import requests
-response = requests.post('http://localhost:8000/api/agent_builder/converse',
-    json={'input': 'Test query', 'agent_id': 'test'},
-    headers={'X-High-Risk': 'true'}
-)
-print(response.json())
-"
+# Run workflow demo
+python workflow_demo.py
+
+# Test specific policies via curl
+curl -X POST http://localhost:8000/api/agent_builder/converse \
+  -H "Content-Type: application/json" \
+  -H "X-High-Risk: true" \
+  -d '{"input": "Test query", "agent_id": "test"}'
 ```
 
-## 🤝 **Contributing**
+## Troubleshooting
+
+### Common Issues
+
+**"Proxy not ready" error:**
+- Ensure all environment variables are set
+- Check that the proxy started successfully
+
+**Validation errors:**
+- Verify your `QUALIFIRE_API_KEY` is valid
+- Check Qualifire API status at [app.qualifire.ai](https://app.qualifire.ai)
+
+**Elastic connection issues:**
+- Verify `KIBANA_URL` and `ELASTIC_API_KEY` are correct
+- Ensure Agent Builder is enabled on your Elastic deployment
+
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
@@ -283,31 +381,17 @@ print(response.json())
 4. Push to branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## 📚 **Resources**
+## Resources
 
 - **Qualifire Documentation**: https://docs.qualifire.ai
 - **Qualifire Dashboard**: https://app.qualifire.ai
-- **Qualifire Python SDK**: https://github.com/qualifire-dev/qualifire-python-sdk
+- **Qualifire API Reference**: https://docs.qualifire.ai/api
 - **Elastic Agent Builder**: https://www.elastic.co/guide/en/elasticsearch/reference/current/agent-builder.html
 
-## 🆘 **Support**
-
-- **Issues**: Create an issue in this repository
-- **Qualifire Support**: Contact support via [app.qualifire.ai](https://app.qualifire.ai)
-- **Elastic Support**: Check Elastic documentation
-
-## 📄 **License**
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 **Acknowledgments**
-
-- **Qualifire Team** for the excellent Python SDK and safety platform
-- **Elastic Team** for Agent Builder and comprehensive API access
-- **Community** for feedback and contributions
-
 ---
 
-**⭐ If this integration helps your AI safety efforts, please star this repository!**
-
-**🛡️ Result**: Every AI response from Elastic Agent Builder will be validated through Qualifire's comprehensive safety checks with detailed scoring and explanations.**
+**Result**: Every AI response from Elastic Agent Builder will be validated through Qualifire's comprehensive safety checks using the messages format for better context understanding.
