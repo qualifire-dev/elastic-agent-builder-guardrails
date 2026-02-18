@@ -10,20 +10,12 @@ This integration provides a production-ready API proxy that ensures **no AI resp
 
 ---
 
-## Problem Solved
+## This Qualifire integration provides
 
-**Without this integration:**
-- AI responses can contain hallucinations, unsafe content, or PII
-- Tool-based safety approaches can be bypassed
-- No guarantee of safety validation coverage
-- Enterprise compliance requirements not met
-
-**With this integration:**
 - **100% validation coverage** - every response is checked
 - **Cannot be bypassed** - proxy intercepts at network level
 - **Production-ready** - enterprise deployment options
 - **Comprehensive safety** - full Qualifire check suite
-- **Messages format** - better context understanding for multi-turn conversations
 
 ## Architecture
 
