@@ -21,11 +21,11 @@ This integration provides a production-ready API proxy that ensures **no AI resp
 
 ```
 Your Application --> Qualifire Proxy --> Elastic Agent Builder
-                          |
-                          v
+                          |  ^
+                          v  |
                     Qualifire API (/api/v1/evaluation/evaluate)
-                          |
-                          v
+                          |  ^
+                          v  |
                     Validated Response
 ```
 
