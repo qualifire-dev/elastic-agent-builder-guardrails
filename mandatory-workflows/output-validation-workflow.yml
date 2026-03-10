@@ -1,322 +1,56 @@
-# =============================================================================
-# Output Validation Workflow - Mandatory Post-Agent Validation
-# =============================================================================
-# This workflow implements MANDATORY output validation AFTER agent execution.
-# Unsafe responses are blocked and NEVER reach the user.
-#
-# Pattern: Agent Response -> Validation -> [BLOCK & Replace] or [Deliver]
-# =============================================================================
-
-version: "1"
 name: rogue-output-validation
-description: >
-  Mandatory output validation workflow that validates agent responses for
-  hallucinations, content moderation, PII, and grounding BEFORE delivery.
-  Unsafe outputs are replaced with safe fallback responses.
+description: Validates agent response with Rogue API before delivering to user
 enabled: true
-
-tags:
-  - security
-  - output-validation
-  - mandatory
-  - gatekeeper
-  - hallucination-detection
-  - pii-protection
-
-# Reusable configuration constants
-consts:
-  rogue_api_url: "https://api.rogue.security"
-  validation_timeout: "15s"
-  confidence_threshold: 0.80
-  log_index: "rogue-validation-logs"
 
 triggers:
   - type: manual
 
-# Input parameters
 inputs:
   - name: user_input
     type: string
-    description: "The original user input (for context)"
-  - name: agent_response
+    description: "The original user input"
+  - name: agent_id
     type: string
-    description: "The agent's response to validate"
+    description: "Agent ID to execute"
   - name: session_id
     type: string
     description: "Session identifier for tracking"
-  - name: user_id
-    type: string
-    default: "anonymous"
-  - name: conversation_history
-    type: array
-    default: []
-    description: "Previous conversation messages for context"
-  - name: domain
-    type: string
-    default: "general"
-    description: "Domain context for policy selection"
-  - name: policy
-    type: string
-    default: "default"
-    description: "Validation policy to apply (default, strict, permissive)"
 
 steps:
-  # =========================================================================
-  # Step 1: Build messages array for validation
-  # =========================================================================
-  - name: build_messages
-    type: set
+  - name: call_agent
+    type: kibana.request
     with:
-      messages: |
-        [
-          {% for msg in inputs.conversation_history %}
-          {"role": "{{ msg.role }}", "content": "{{ msg.content }}"},
-          {% endfor %}
-          {"role": "user", "content": "{{ inputs.user_input }}"},
-          {"role": "assistant", "content": "{{ inputs.agent_response }}"}
-        ]
+      method: POST
+      path: /api/agent_builder/converse
+      body:
+        input: "{{ inputs.user_input }}"
+        agent_id: "{{ inputs.agent_id }}"
 
-  # =========================================================================
-  # Step 2: Determine validation checks based on policy
-  # =========================================================================
-  - name: set_validation_config
-    type: if
-    condition: "{{ inputs.policy == 'strict' }}"
-    steps:
-      - name: config_strict
-        type: set
-        with:
-          hallucinations_check: true
-          content_moderation_check: true
-          pii_check: true
-          grounding_check: true
-          prompt_injections: true
-          confidence_threshold: 0.90
-    else:
-      - name: check_permissive
-        type: if
-        condition: "{{ inputs.policy == 'permissive' }}"
-        steps:
-          - name: config_permissive
-            type: set
-            with:
-              hallucinations_check: true
-              content_moderation_check: true
-              pii_check: false
-              grounding_check: false
-              prompt_injections: false
-              confidence_threshold: 0.70
-        else:
-          - name: config_default
-            type: set
-            with:
-              hallucinations_check: true
-              content_moderation_check: true
-              pii_check: false
-              grounding_check: false
-              prompt_injections: false
-              confidence_threshold: 0.80
-
-  # =========================================================================
-  # Step 3: Validate Output with Rogue Security API
-  # =========================================================================
   - name: validate_output
     type: http
     with:
-      url: "{{ consts.rogue_api_url }}/api/v1/evaluation/evaluate"
+      url: "https://api.rogue.security/api/v1/evaluation/evaluate"
       method: POST
       headers:
         X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
         Content-Type: "application/json"
-        X-Request-ID: "{{ inputs.session_id }}"
-      timeout: "{{ consts.validation_timeout }}"
-      body: |
-        {
-          "messages": {{ steps.build_messages.output.messages | json }},
-          "hallucinations_check": true,
-          "content_moderation_check": true,
-          "pii_check": {{ steps.set_validation_config.output.pii_check | default: false }},
-          "grounding_check": {{ steps.set_validation_config.output.grounding_check | default: false }},
-          "prompt_injections": {{ steps.set_validation_config.output.prompt_injections | default: false }},
-          "grounding_multi_turn_mode": true
-        }
+      body: '{"messages":[{"role":"user","content":"{{ inputs.user_input }}"},{"role":"assistant","content":"{{ steps.call_agent.output.response.message }}"}],"hallucinations_check":true,"content_moderation_check":true,"pii_check":true,"grounding_check":true}'
 
-  # =========================================================================
-  # Step 4: Log validation attempt
-  # =========================================================================
-  - name: log_validation
-    type: elasticsearch.index
-    with:
-      index: "{{ consts.log_index }}"
-      document:
-        timestamp: "{{ steps.validate_output.output.timestamp }}"
-        workflow: "output-validation"
-        session_id: "{{ inputs.session_id }}"
-        user_id: "{{ inputs.user_id }}"
-        domain: "{{ inputs.domain }}"
-        policy: "{{ inputs.policy }}"
-        response_preview: "{{ inputs.agent_response | truncate: 200 }}"
-        validation_score: "{{ steps.validate_output.output.data.score }}"
-        validation_status: "{{ steps.validate_output.output.data.status }}"
-        evaluation_results: "{{ steps.validate_output.output.data.evaluationResults }}"
-
-  # =========================================================================
-  # Step 5: Process validation results
-  # =========================================================================
-  - name: check_validation_passed
+  - name: check_output
     type: if
-    condition: "{{ steps.validate_output.output.data.status == 'success' }}"
-
-    # OUTPUT IS SAFE - Deliver to user
+    condition: "steps.validate_output.output.body.data.status: success"
     steps:
-      - name: log_output_approved
-        type: elasticsearch.index
-        with:
-          index: "{{ consts.log_index }}"
-          document:
-            timestamp: "{{ steps.validate_output.output.timestamp }}"
-            workflow: "output-validation"
-            session_id: "{{ inputs.session_id }}"
-            decision: "approved"
-            score: "{{ steps.validate_output.output.data.score }}"
-
-      - name: return_validated_response
+      - name: return_safe
         type: return
         with:
-          status: "success"
-          response: "{{ inputs.agent_response }}"
-          validation:
-            output_validated: true
-            output_passed: true
-            score: "{{ steps.validate_output.output.data.score }}"
-            policy_applied: "{{ inputs.policy }}"
-            checks_performed:
-              hallucinations: true
-              content_moderation: true
+          status: "delivered"
+          response: "{{ steps.call_agent.output.response.message }}"
+          score: "{{ steps.validate_output.output.body.data.score }}"
 
-    # OUTPUT IS UNSAFE - Block and replace
     else:
-      - name: analyze_failures
-        type: set
+      - name: return_blocked
+        type: return
         with:
-          failed_checks: "{{ steps.validate_output.output.data.evaluationResults }}"
-          has_hallucination: "{{ steps.validate_output.output.data.evaluationResults | map: 'type' | contains: 'hallucinations' }}"
-          has_content_violation: "{{ steps.validate_output.output.data.evaluationResults | map: 'type' | contains: 'content_moderation' }}"
-          has_pii: "{{ steps.validate_output.output.data.evaluationResults | map: 'type' | contains: 'pii' }}"
-          has_grounding_issue: "{{ steps.validate_output.output.data.evaluationResults | map: 'type' | contains: 'grounding' }}"
-
-      - name: log_output_blocked
-        type: elasticsearch.index
-        with:
-          index: "{{ consts.log_index }}"
-          document:
-            timestamp: "{{ steps.validate_output.output.timestamp }}"
-            workflow: "output-validation"
-            session_id: "{{ inputs.session_id }}"
-            user_id: "{{ inputs.user_id }}"
-            decision: "blocked"
-            reason: "Output failed safety validation"
-            score: "{{ steps.validate_output.output.data.score }}"
-            failed_checks: "{{ steps.analyze_failures.output.failed_checks }}"
-            original_response_hash: "{{ inputs.agent_response | md5 }}"
-            severity: "high"
-
-      # Generate appropriate safe response based on failure type
-      - name: generate_safe_response
-        type: if
-        condition: "{{ steps.analyze_failures.output.has_hallucination }}"
-        steps:
-          - name: return_hallucination_safe
-            type: return
-            with:
-              status: "blocked"
-              response: "I don't have sufficient reliable information to answer that accurately. Let me help you find verified sources for this topic."
-              validation:
-                output_validated: true
-                output_blocked: true
-                block_reason: "hallucination_detected"
-                original_blocked: true
-                score: "{{ steps.validate_output.output.data.score }}"
-        else:
-          - name: check_content_violation
-            type: if
-            condition: "{{ steps.analyze_failures.output.has_content_violation }}"
-            steps:
-              - name: return_content_safe
-                type: return
-                with:
-                  status: "blocked"
-                  response: "I can't provide that type of content. How can I help you with something else instead?"
-                  validation:
-                    output_validated: true
-                    output_blocked: true
-                    block_reason: "content_policy_violation"
-                    original_blocked: true
-                    score: "{{ steps.validate_output.output.data.score }}"
-            else:
-              - name: check_pii_violation
-                type: if
-                condition: "{{ steps.analyze_failures.output.has_pii }}"
-                steps:
-                  - name: return_pii_safe
-                    type: return
-                    with:
-                      status: "blocked"
-                      response: "I've detected that my response might contain sensitive personal information. Let me provide a more appropriate answer without including personal details."
-                      validation:
-                        output_validated: true
-                        output_blocked: true
-                        block_reason: "pii_detected"
-                        original_blocked: true
-                        score: "{{ steps.validate_output.output.data.score }}"
-                else:
-                  - name: check_grounding_issue
-                    type: if
-                    condition: "{{ steps.analyze_failures.output.has_grounding_issue }}"
-                    steps:
-                      - name: return_grounding_safe
-                        type: return
-                        with:
-                          status: "blocked"
-                          response: "I want to make sure my response is well-grounded in reliable information. Let me provide a more careful answer based on verified facts."
-                          validation:
-                            output_validated: true
-                            output_blocked: true
-                            block_reason: "grounding_issue"
-                            original_blocked: true
-                            score: "{{ steps.validate_output.output.data.score }}"
-                    else:
-                      - name: return_generic_safe
-                        type: return
-                        with:
-                          status: "blocked"
-                          response: "I need to be more careful with my response to ensure accuracy and safety. How can I better help you with your request?"
-                          validation:
-                            output_validated: true
-                            output_blocked: true
-                            block_reason: "safety_validation_failed"
-                            original_blocked: true
-                            score: "{{ steps.validate_output.output.data.score }}"
-
-# Error handling
-on_error:
-  - name: log_error
-    type: elasticsearch.index
-    with:
-      index: "{{ consts.log_index }}-errors"
-      document:
-        timestamp: "{{ now }}"
-        workflow: "output-validation"
-        session_id: "{{ inputs.session_id }}"
-        error: "{{ error.message }}"
-        step: "{{ error.step }}"
-
-  - name: return_error_safe
-    type: return
-    with:
-      status: "error"
-      response: "I apologize, but I cannot provide a response at this time due to a safety system issue. Please try again later."
-      validation:
-        output_validated: false
-        error: true
-        fallback_used: true
+          status: "blocked"
+          response: "I apologize, but I cannot provide that response. Please try rephrasing your question."
+          score: "{{ steps.validate_output.output.body.data.score }}"

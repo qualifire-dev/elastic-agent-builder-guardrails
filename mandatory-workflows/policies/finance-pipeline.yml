@@ -1,32 +1,6 @@
-# =============================================================================
-# Finance Pipeline Policy
-# =============================================================================
-# Financial services compliance validation with SEC/regulatory checks.
-# Prevents investment advice, guarantees, and ensures proper disclaimers.
-# =============================================================================
-
-version: "1"
 name: rogue-finance-pipeline
-description: >
-  Finance-specific mandatory validation pipeline with regulatory compliance.
-  Prevents investment advice, return guarantees, and ensures all responses
-  include appropriate risk disclosures and professional consultation recommendations.
+description: Finance validation with SEC compliance assertions
 enabled: true
-
-tags:
-  - finance
-  - investment
-  - sec-compliance
-  - regulated
-  - high-stakes
-
-consts:
-  rogue_api_url: "https://api.rogue.security"
-  validation_timeout: "15s"
-  log_index: "rogue-finance-logs"
-  compliance_index: "rogue-finance-compliance"
-  input_confidence_threshold: 0.90
-  output_confidence_threshold: 0.90
 
 triggers:
   - type: manual
@@ -34,155 +8,75 @@ triggers:
 inputs:
   - name: user_input
     type: string
+    description: "The user's input message"
   - name: agent_id
     type: string
+    description: "Agent ID to execute"
   - name: session_id
     type: string
-  - name: user_accreditation
-    type: string
-    default: "retail"
-    description: "User type: retail, accredited, institutional"
-  - name: conversation_history
-    type: array
-    default: []
+    description: "Session identifier for tracking"
 
 steps:
-  # =========================================================================
-  # Input Validation
-  # =========================================================================
-  - name: validate_finance_input
+  - name: validate_input
     type: http
     with:
-      url: "{{ consts.rogue_api_url }}/api/v1/evaluation/evaluate"
+      url: "https://api.rogue.security/api/v1/evaluation/evaluate"
       method: POST
       headers:
         X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
         Content-Type: "application/json"
-        X-Domain: "finance"
-      timeout: "{{ consts.validation_timeout }}"
-      body: |
-        {
-          "messages": [
-            {"role": "user", "content": "{{ inputs.user_input }}"}
-          ],
-          "prompt_injections": true,
-          "content_moderation_check": true,
-          "policy_target": "input"
-        }
+      body: '{"messages":[{"role":"user","content":"{{ inputs.user_input }}"}],"prompt_injections":true,"content_moderation_check":true,"policy_target":"input"}'
 
   - name: input_gate
     type: if
-    condition: "{{ steps.validate_finance_input.output.data.status == 'success' }}"
+    condition: "steps.validate_input.output.body.data.status: success"
     steps:
-      - name: execute_finance_agent
-        type: http
+      - name: call_agent
+        type: kibana.request
         with:
-          url: "{{ secrets.kibana_url }}/api/agent_builder/converse"
           method: POST
-          headers:
-            Authorization: "ApiKey {{ secrets.elastic_api_key }}"
-            Content-Type: "application/json"
-            kbn-xsrf: "true"
-          timeout: "60s"
-          body: |
-            {
-              "input": "{{ inputs.user_input }}",
-              "agent_id": "{{ inputs.agent_id }}",
-              "session_id": "{{ inputs.session_id }}",
-              "system_prompt": "You are a financial information assistant. You MUST NOT provide specific investment advice, guarantee returns, or recommend specific securities. Always recommend consulting licensed financial advisors."
-            }
+          path: /api/agent_builder/converse
+          body:
+            input: "{{ inputs.user_input }}"
+            agent_id: "{{ inputs.agent_id }}"
 
-      # Output validation with finance-specific assertions
-      - name: validate_finance_output
+      - name: validate_output
         type: http
         with:
-          url: "{{ consts.rogue_api_url }}/api/v1/evaluation/evaluate"
+          url: "https://api.rogue.security/api/v1/evaluation/evaluate"
           method: POST
           headers:
             X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
             Content-Type: "application/json"
-            X-Domain: "finance"
-          timeout: "{{ consts.validation_timeout }}"
-          body: |
-            {
-              "messages": [
-                {"role": "user", "content": "{{ inputs.user_input }}"},
-                {"role": "assistant", "content": "{{ steps.execute_finance_agent.output.data.response }}"}
-              ],
-              "hallucinations_check": true,
-              "content_moderation_check": true,
-              "pii_check": true,
-              "assertions": [
-                "The response must not guarantee investment returns or profits",
-                "The response must not recommend specific stocks, bonds, or securities to purchase",
-                "The response must not provide personalized investment advice",
-                "The response must recommend consulting a licensed financial advisor for investment decisions",
-                "The response must acknowledge investment risks when discussing financial products",
-                "The response must not claim to be a substitute for professional financial advice",
-                "The response must not make predictions about market performance as certainties"
-              ]
-            }
-
-      - name: log_finance_validation
-        type: elasticsearch.index
-        with:
-          index: "{{ consts.compliance_index }}"
-          document:
-            timestamp: "{{ now }}"
-            workflow: "finance-pipeline"
-            session_id: "{{ inputs.session_id }}"
-            user_type: "{{ inputs.user_accreditation }}"
-            input_score: "{{ steps.validate_finance_input.output.data.score }}"
-            output_score: "{{ steps.validate_finance_output.output.data.score }}"
-            sec_compliance_check: true
+          body: '{"messages":[{"role":"user","content":"{{ inputs.user_input }}"},{"role":"assistant","content":"{{ steps.call_agent.output.response.message }}"}],"hallucinations_check":true,"content_moderation_check":true,"pii_check":true,"assertions":["The response must not guarantee investment returns","The response must not recommend specific securities to purchase","The response must recommend consulting a licensed financial advisor"]}'
 
       - name: output_gate
         type: if
-        condition: "{{ steps.validate_finance_output.output.data.status == 'success' }}"
+        condition: "steps.validate_output.output.body.data.status: success"
         steps:
-          - name: return_validated_finance_response
+          - name: return_safe
             type: return
             with:
-              status: "success"
-              response: "{{ steps.execute_finance_agent.output.data.response }}"
-              rogue_validation:
-                domain: "finance"
-                input_passed: true
-                output_passed: true
-                sec_compliant: true
-                user_type: "{{ inputs.user_accreditation }}"
-        else:
-          - name: log_finance_violation
-            type: elasticsearch.index
-            with:
-              index: "{{ consts.compliance_index }}"
-              document:
-                timestamp: "{{ now }}"
-                workflow: "finance-pipeline"
-                session_id: "{{ inputs.session_id }}"
-                decision: "blocked"
-                violation_type: "financial_compliance"
-                failed_assertions: "{{ steps.validate_finance_output.output.data.evaluationResults }}"
-                severity: "high"
-                requires_review: true
+              status: "delivered"
+              response: "{{ steps.call_agent.output.response.message }}"
+              domain: "finance"
+              input_score: "{{ steps.validate_input.output.body.data.score }}"
+              output_score: "{{ steps.validate_output.output.body.data.score }}"
 
-          - name: return_finance_safe_response
+        else:
+          - name: return_output_blocked
             type: return
             with:
               status: "blocked"
-              response: "I cannot provide specific investment advice or financial recommendations. Investment decisions involve risk, and past performance does not guarantee future results. Please consult with a licensed financial advisor who can review your complete financial situation and provide personalized guidance."
-              rogue_validation:
-                domain: "finance"
-                input_passed: true
-                output_blocked: true
-                block_reason: "financial_compliance_assertions_failed"
+              response: "I cannot provide specific investment advice. Please consult with a licensed financial advisor."
+              domain: "finance"
+              output_score: "{{ steps.validate_output.output.body.data.score }}"
+
     else:
-      - name: return_finance_input_blocked
+      - name: return_input_blocked
         type: return
         with:
           status: "blocked"
-          response: "I cannot process this financial request. For investment guidance, please consult with a licensed financial advisor."
-          rogue_validation:
-            domain: "finance"
-            input_blocked: true
-            agent_executed: false
+          response: "I cannot process this financial request. Please consult a licensed financial advisor."
+          domain: "finance"
+          input_score: "{{ steps.validate_input.output.body.data.score }}"

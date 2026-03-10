@@ -1,31 +1,6 @@
-# =============================================================================
-# Customer Service Pipeline Policy
-# =============================================================================
-# Customer-facing validation with PII protection and content moderation.
-# Balanced safety with good user experience.
-# =============================================================================
-
-version: "1"
 name: rogue-customer-service-pipeline
-description: >
-  Customer service validation pipeline with focus on PII protection,
-  content moderation, and appropriate response quality. Balances
-  safety requirements with good customer experience.
+description: Customer service validation with PII protection
 enabled: true
-
-tags:
-  - customer-service
-  - pii-protection
-  - public-facing
-  - support
-
-consts:
-  rogue_api_url: "https://api.rogue.security"
-  validation_timeout: "10s"
-  log_index: "rogue-customer-service-logs"
-  incident_index: "rogue-customer-incidents"
-  input_confidence_threshold: 0.85
-  output_confidence_threshold: 0.85
 
 triggers:
   - type: manual
@@ -33,177 +8,75 @@ triggers:
 inputs:
   - name: user_input
     type: string
+    description: "The user's input message"
   - name: agent_id
     type: string
+    description: "Agent ID to execute"
   - name: session_id
     type: string
-  - name: customer_id
-    type: string
-    default: "anonymous"
-  - name: support_tier
-    type: string
-    default: "standard"
-    description: "Support tier: standard, premium, enterprise"
-  - name: conversation_history
-    type: array
-    default: []
+    description: "Session identifier for tracking"
 
 steps:
-  # =========================================================================
-  # Input Validation - Check for malicious inputs
-  # =========================================================================
-  - name: validate_customer_input
+  - name: validate_input
     type: http
     with:
-      url: "{{ consts.rogue_api_url }}/api/v1/evaluation/evaluate"
+      url: "https://api.rogue.security/api/v1/evaluation/evaluate"
       method: POST
       headers:
         X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
         Content-Type: "application/json"
-        X-Domain: "customer_service"
-      timeout: "{{ consts.validation_timeout }}"
-      body: |
-        {
-          "messages": [
-            {"role": "user", "content": "{{ inputs.user_input }}"}
-          ],
-          "prompt_injections": true,
-          "content_moderation_check": true,
-          "policy_target": "input"
-        }
+      body: '{"messages":[{"role":"user","content":"{{ inputs.user_input }}"}],"prompt_injections":true,"content_moderation_check":true,"policy_target":"input"}'
 
   - name: input_gate
     type: if
-    condition: "{{ steps.validate_customer_input.output.data.status == 'success' }}"
+    condition: "steps.validate_input.output.body.data.status: success"
     steps:
-      - name: execute_support_agent
-        type: http
+      - name: call_agent
+        type: kibana.request
         with:
-          url: "{{ secrets.kibana_url }}/api/agent_builder/converse"
           method: POST
-          headers:
-            Authorization: "ApiKey {{ secrets.elastic_api_key }}"
-            Content-Type: "application/json"
-            kbn-xsrf: "true"
-          timeout: "45s"
-          body: |
-            {
-              "input": "{{ inputs.user_input }}",
-              "agent_id": "{{ inputs.agent_id }}",
-              "session_id": "{{ inputs.session_id }}",
-              "conversation_history": {{ inputs.conversation_history | json }},
-              "system_prompt": "You are a helpful customer service assistant. Be friendly and professional. Never expose sensitive customer data like full account numbers, SSNs, or passwords. If you need to reference account information, use only the last 4 digits."
-            }
+          path: /api/agent_builder/converse
+          body:
+            input: "{{ inputs.user_input }}"
+            agent_id: "{{ inputs.agent_id }}"
 
-      # Output validation with PII focus
-      - name: validate_customer_output
+      - name: validate_output
         type: http
         with:
-          url: "{{ consts.rogue_api_url }}/api/v1/evaluation/evaluate"
+          url: "https://api.rogue.security/api/v1/evaluation/evaluate"
           method: POST
           headers:
             X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
             Content-Type: "application/json"
-            X-Domain: "customer_service"
-          timeout: "{{ consts.validation_timeout }}"
-          body: |
-            {
-              "messages": [
-                {"role": "user", "content": "{{ inputs.user_input }}"},
-                {"role": "assistant", "content": "{{ steps.execute_support_agent.output.data.response }}"}
-              ],
-              "hallucinations_check": true,
-              "content_moderation_check": true,
-              "pii_check": true,
-              "prompt_injections": true
-            }
-
-      - name: log_support_interaction
-        type: elasticsearch.index
-        with:
-          index: "{{ consts.log_index }}"
-          document:
-            timestamp: "{{ now }}"
-            workflow: "customer-service-pipeline"
-            session_id: "{{ inputs.session_id }}"
-            customer_id: "{{ inputs.customer_id }}"
-            support_tier: "{{ inputs.support_tier }}"
-            input_score: "{{ steps.validate_customer_input.output.data.score }}"
-            output_score: "{{ steps.validate_customer_output.output.data.score }}"
-            pii_checked: true
+          body: '{"messages":[{"role":"user","content":"{{ inputs.user_input }}"},{"role":"assistant","content":"{{ steps.call_agent.output.response.message }}"}],"hallucinations_check":true,"content_moderation_check":true,"pii_check":true}'
 
       - name: output_gate
         type: if
-        condition: "{{ steps.validate_customer_output.output.data.status == 'success' }}"
+        condition: "steps.validate_output.output.body.data.status: success"
         steps:
-          - name: return_support_response
+          - name: return_safe
             type: return
             with:
-              status: "success"
-              response: "{{ steps.execute_support_agent.output.data.response }}"
-              rogue_validation:
-                domain: "customer_service"
-                input_passed: true
-                output_passed: true
-                pii_safe: true
-                support_tier: "{{ inputs.support_tier }}"
+              status: "delivered"
+              response: "{{ steps.call_agent.output.response.message }}"
+              domain: "customer_service"
+              input_score: "{{ steps.validate_input.output.body.data.score }}"
+              output_score: "{{ steps.validate_output.output.body.data.score }}"
+
         else:
-          # Check if it's a PII issue
-          - name: check_pii_issue
-            type: if
-            condition: "{{ steps.validate_customer_output.output.data.evaluationResults | contains: 'pii' }}"
-            steps:
-              - name: log_pii_incident
-                type: elasticsearch.index
-                with:
-                  index: "{{ consts.incident_index }}"
-                  document:
-                    timestamp: "{{ now }}"
-                    workflow: "customer-service-pipeline"
-                    session_id: "{{ inputs.session_id }}"
-                    customer_id: "{{ inputs.customer_id }}"
-                    incident_type: "pii_exposure_blocked"
-                    severity: "high"
-                    requires_review: true
+          - name: return_output_blocked
+            type: return
+            with:
+              status: "blocked"
+              response: "I apologize, but I need to protect your privacy. How else can I assist you?"
+              domain: "customer_service"
+              output_score: "{{ steps.validate_output.output.body.data.score }}"
 
-              - name: return_pii_safe
-                type: return
-                with:
-                  status: "blocked"
-                  response: "I apologize, but I need to be careful about sharing certain information. Let me provide a response that protects your privacy. How else can I assist you?"
-                  rogue_validation:
-                    domain: "customer_service"
-                    output_blocked: true
-                    block_reason: "pii_protection"
-            else:
-              - name: return_content_safe
-                type: return
-                with:
-                  status: "blocked"
-                  response: "I apologize, but I cannot provide that response. Let me try to help you in a different way. Could you please rephrase your question?"
-                  rogue_validation:
-                    domain: "customer_service"
-                    output_blocked: true
-                    block_reason: "content_policy"
     else:
-      - name: log_abusive_customer
-        type: elasticsearch.index
-        with:
-          index: "{{ consts.incident_index }}"
-          document:
-            timestamp: "{{ now }}"
-            workflow: "customer-service-pipeline"
-            session_id: "{{ inputs.session_id }}"
-            customer_id: "{{ inputs.customer_id }}"
-            incident_type: "input_blocked"
-            input_preview: "{{ inputs.user_input | truncate: 50 }}"
-
-      - name: return_polite_decline
+      - name: return_input_blocked
         type: return
         with:
           status: "blocked"
-          response: "I want to help you, but I'm not able to respond to that particular request. Could you please rephrase your question? I'm here to assist with your customer service needs."
-          rogue_validation:
-            domain: "customer_service"
-            input_blocked: true
-            agent_executed: false
+          response: "I want to help you, but I cannot respond to that request. Could you please rephrase?"
+          domain: "customer_service"
+          input_score: "{{ steps.validate_input.output.body.data.score }}"

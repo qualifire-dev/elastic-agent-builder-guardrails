@@ -4,6 +4,14 @@
 
 This guide explains how to implement **mandatory validation workflows** that ensure all AI agent interactions are validated through Rogue Security's guardrails before reaching users.
 
+### Workflow Format
+
+These workflows use the simplified Elastic Workflows YAML format:
+- **No version field required** - simple, clean structure
+- **`type: kibana.request`** - native Kibana API calls
+- **Condition syntax**: `"steps.name.output.body.data.field: value"`
+- **Single-line JSON body** - compact HTTP request bodies
+
 ---
 
 ## Table of Contents
@@ -135,10 +143,57 @@ Validates user input BEFORE agent execution:
 - Malicious request blocking
 
 ```yaml
-# Key configuration
-policy_target: "input"
-prompt_injections: true
-content_moderation_check: true
+name: rogue-input-gating
+description: Validates input with Rogue API before passing to agent
+enabled: true
+
+triggers:
+  - type: manual
+
+inputs:
+  - name: user_input
+    type: string
+  - name: agent_id
+    type: string
+  - name: session_id
+    type: string
+
+steps:
+  - name: call_rogue
+    type: http
+    with:
+      url: "https://api.rogue.security/api/v1/evaluation/evaluate"
+      method: POST
+      headers:
+        X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
+        Content-Type: "application/json"
+      body: '{"messages":[{"role":"user","content":"{{ inputs.user_input }}"}],"prompt_injections":true,"content_moderation_check":true,"policy_target":"input"}'
+
+  - name: check_safety
+    type: if
+    condition: "steps.call_rogue.output.body.data.status: success"
+    steps:
+      - name: call_agent
+        type: kibana.request
+        with:
+          method: POST
+          path: /api/agent_builder/converse
+          body:
+            input: "{{ inputs.user_input }}"
+            agent_id: "{{ inputs.agent_id }}"
+
+      - name: return_response
+        type: return
+        with:
+          status: "allowed"
+          response: "{{ steps.call_agent.output.response.message }}"
+
+    else:
+      - name: return_blocked
+        type: return
+        with:
+          status: "blocked"
+          response: "I cannot process this request due to safety policies."
 ```
 
 ### 2. Output Validation Workflow
@@ -365,15 +420,15 @@ curl -X POST "https://api.rogue.security/api/v1/evaluation/evaluate" \
 
 **Solutions:**
 ```yaml
-# Correct syntax
-condition: "{{ steps.validate.output.data.status == 'success' }}"
+# Correct syntax for Elastic Workflows
+condition: "steps.validate.output.body.data.status: success"
 
-# Not
-condition: "${validate.status} == 'success'"
+# Not Jinja-style (deprecated)
+condition: "{{ steps.validate.output.data.status == 'success' }}"
 ```
 
-- Use correct comparison operators
-- Check for proper quoting
+- Use the colon syntax: `"steps.name.output.body.data.field: value"`
+- Check the full output path including `.body.` for HTTP responses
 - Verify the data structure being compared
 
 #### 5. Timeout Errors

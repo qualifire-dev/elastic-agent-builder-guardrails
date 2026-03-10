@@ -1,239 +1,56 @@
-# =============================================================================
-# Input Gating Workflow - Mandatory Pre-Agent Validation
-# =============================================================================
-# This workflow implements MANDATORY input validation BEFORE agent execution.
-# Unsafe inputs are blocked and NEVER reach the agent.
-#
-# Pattern: User Input -> Validation -> [BLOCK] or [PROCEED to Agent]
-# =============================================================================
-
-version: "1"
 name: rogue-input-gating
-description: >
-  Mandatory input validation workflow that blocks malicious prompts,
-  prompt injections, and harmful requests BEFORE they reach the agent.
-  This is a gatekeeper pattern - unsafe inputs are stopped at the gate.
+description: Validates input with Rogue API before passing to agent
 enabled: true
 
-tags:
-  - security
-  - input-validation
-  - mandatory
-  - gatekeeper
-
-# Reusable configuration constants
-consts:
-  rogue_api_url: "https://api.rogue.security"
-  validation_timeout: "10s"
-  confidence_threshold: 0.85
-  log_index: "rogue-validation-logs"
-
-# Trigger types - can be manual or event-driven
 triggers:
   - type: manual
 
-# Input parameters required by the workflow
 inputs:
   - name: user_input
     type: string
     description: "The user's input message to validate"
-  - name: session_id
-    type: string
-    description: "Session identifier for tracking"
-  - name: user_id
-    type: string
-    default: "anonymous"
-    description: "User identifier for audit logging"
   - name: agent_id
     type: string
     description: "Target agent ID to execute if input is safe"
-  - name: domain
+  - name: session_id
     type: string
-    default: "general"
-    description: "Domain context (healthcare, finance, legal, general)"
+    description: "Session identifier for tracking"
 
 steps:
-  # =========================================================================
-  # Step 1: Validate Input with Rogue Security API
-  # =========================================================================
-  - name: validate_input
+  - name: call_rogue
     type: http
     with:
-      url: "{{ consts.rogue_api_url }}/api/v1/evaluation/evaluate"
+      url: "https://api.rogue.security/api/v1/evaluation/evaluate"
       method: POST
       headers:
         X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
         Content-Type: "application/json"
-        X-Request-ID: "{{ inputs.session_id }}"
-      timeout: "{{ consts.validation_timeout }}"
-      body: |
-        {
-          "messages": [
-            {"role": "user", "content": "{{ inputs.user_input }}"}
-          ],
-          "prompt_injections": true,
-          "content_moderation_check": true,
-          "pii_check": false,
-          "hallucinations_check": false,
-          "policy_target": "input"
-        }
+      body: '{"messages":[{"role":"user","content":"{{ inputs.user_input }}"}],"prompt_injections":true,"content_moderation_check":true,"pii_check":false,"hallucinations_check":false,"policy_target":"input"}'
 
-  # =========================================================================
-  # Step 2: Log the validation attempt (always executed)
-  # =========================================================================
-  - name: log_validation_attempt
-    type: elasticsearch.index
-    with:
-      index: "{{ consts.log_index }}"
-      document:
-        timestamp: "{{ steps.validate_input.output.timestamp }}"
-        workflow: "input-gating"
-        session_id: "{{ inputs.session_id }}"
-        user_id: "{{ inputs.user_id }}"
-        domain: "{{ inputs.domain }}"
-        input_preview: "{{ inputs.user_input | truncate: 200 }}"
-        validation_score: "{{ steps.validate_input.output.data.score }}"
-        validation_status: "{{ steps.validate_input.output.data.status }}"
-        checks_performed:
-          prompt_injections: true
-          content_moderation: true
-
-  # =========================================================================
-  # Step 3: Check if input passed validation
-  # =========================================================================
-  - name: check_input_safety
+  - name: check_safety
     type: if
-    condition: "{{ steps.validate_input.output.data.status == 'success' }}"
-
-    # INPUT IS SAFE - Proceed to agent execution
+    condition: "steps.call_rogue.output.body.data.status: success"
     steps:
-      - name: log_input_approved
-        type: elasticsearch.index
+      - name: call_agent
+        type: kibana.request
         with:
-          index: "{{ consts.log_index }}"
-          document:
-            timestamp: "{{ steps.validate_input.output.timestamp }}"
-            workflow: "input-gating"
-            session_id: "{{ inputs.session_id }}"
-            decision: "approved"
-            reason: "Input passed all safety checks"
-            score: "{{ steps.validate_input.output.data.score }}"
-
-      # Execute the agent with validated input
-      - name: execute_agent
-        type: http
-        with:
-          url: "{{ consts.kibana_url }}/api/agent_builder/converse"
           method: POST
-          headers:
-            Authorization: "ApiKey {{ secrets.elastic_api_key }}"
-            Content-Type: "application/json"
-            kbn-xsrf: "true"
-          timeout: "60s"
-          body: |
-            {
-              "input": "{{ inputs.user_input }}",
-              "agent_id": "{{ inputs.agent_id }}",
-              "session_id": "{{ inputs.session_id }}"
-            }
+          path: /api/agent_builder/converse
+          body:
+            input: "{{ inputs.user_input }}"
+            agent_id: "{{ inputs.agent_id }}"
 
-      # Return agent response
-      - name: return_agent_response
+      - name: return_response
         type: return
         with:
-          status: "success"
-          response: "{{ steps.execute_agent.output.data.response }}"
-          validation:
-            input_validated: true
-            input_score: "{{ steps.validate_input.output.data.score }}"
-            agent_executed: true
+          status: "allowed"
+          response: "{{ steps.call_agent.output.response.message }}"
+          score: "{{ steps.call_rogue.output.body.data.score }}"
 
-    # INPUT IS UNSAFE - Block execution
     else:
-      - name: extract_failed_checks
-        type: set
+      - name: return_blocked
+        type: return
         with:
-          failed_checks: "{{ steps.validate_input.output.data.evaluationResults }}"
-
-      - name: log_input_blocked
-        type: elasticsearch.index
-        with:
-          index: "{{ consts.log_index }}"
-          document:
-            timestamp: "{{ steps.validate_input.output.timestamp }}"
-            workflow: "input-gating"
-            session_id: "{{ inputs.session_id }}"
-            user_id: "{{ inputs.user_id }}"
-            decision: "blocked"
-            reason: "Input failed safety validation"
-            score: "{{ steps.validate_input.output.data.score }}"
-            failed_checks: "{{ steps.extract_failed_checks.output.failed_checks }}"
-            severity: "high"
-
-      # Determine appropriate block message based on check type
-      - name: check_prompt_injection
-        type: if
-        condition: "{{ steps.validate_input.output.data.evaluationResults | contains: 'prompt_injection' }}"
-        steps:
-          - name: return_injection_block
-            type: return
-            with:
-              status: "blocked"
-              response: "I noticed something unusual in your request. For security reasons, I cannot process this input. Please rephrase your question."
-              validation:
-                input_validated: true
-                input_blocked: true
-                block_reason: "prompt_injection_detected"
-                input_score: "{{ steps.validate_input.output.data.score }}"
-                agent_executed: false
-        else:
-          - name: check_content_moderation
-            type: if
-            condition: "{{ steps.validate_input.output.data.evaluationResults | contains: 'content_moderation' }}"
-            steps:
-              - name: return_content_block
-                type: return
-                with:
-                  status: "blocked"
-                  response: "I'm not able to help with that type of request. Please ask me something else."
-                  validation:
-                    input_validated: true
-                    input_blocked: true
-                    block_reason: "content_policy_violation"
-                    input_score: "{{ steps.validate_input.output.data.score }}"
-                    agent_executed: false
-            else:
-              - name: return_generic_block
-                type: return
-                with:
-                  status: "blocked"
-                  response: "I cannot process this request due to safety policies. Please try rephrasing your question."
-                  validation:
-                    input_validated: true
-                    input_blocked: true
-                    block_reason: "safety_validation_failed"
-                    input_score: "{{ steps.validate_input.output.data.score }}"
-                    agent_executed: false
-
-# Error handling for API failures
-on_error:
-  - name: log_error
-    type: elasticsearch.index
-    with:
-      index: "{{ consts.log_index }}-errors"
-      document:
-        timestamp: "{{ now }}"
-        workflow: "input-gating"
-        session_id: "{{ inputs.session_id }}"
-        error: "{{ error.message }}"
-        step: "{{ error.step }}"
-
-  - name: return_error_response
-    type: return
-    with:
-      status: "error"
-      response: "I apologize, but I'm experiencing technical difficulties. Please try again in a moment."
-      validation:
-        input_validated: false
-        error: true
-        agent_executed: false
+          status: "blocked"
+          response: "I cannot process this request due to safety policies."
+          score: "{{ steps.call_rogue.output.body.data.score }}"

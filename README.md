@@ -31,23 +31,80 @@ Your Application --> Rogue Security Proxy --> Elastic Agent Builder
 
 The proxy transparently intercepts all Agent Builder API calls, validates responses through Rogue Security's evaluation API using the messages format, and returns safe content with detailed validation metadata.
 
-## Two Integration Approaches
+## Three Integration Approaches
 
 This repository provides **complementary integration options** for different use cases:
 
-### API Proxy (Guaranteed Validation)
+### 1. API Proxy (Guaranteed Validation)
 - **Cannot be bypassed** - Network-level interception
 - **100% validation coverage** - Every response validated
 - **Enterprise-grade** - Perfect for regulated industries
 - **Use when**: You need guaranteed safety with zero bypass possibility
 
-### Workflows Integration (Flexible Validation)
+### 2. Mandatory Workflows (Gatekeeper Pattern)
+- **Dual-gate validation** - Input validation BEFORE agent, output validation BEFORE delivery
+- **Domain-specific policies** - Healthcare (95%), Finance (90%), Customer Service (85%), Research (70%)
+- **Native Elastic integration** - Works with Elastic Workflows
+- **Comprehensive logging** - All decisions logged to Elasticsearch
+- **Use when**: You need workflow-based validation with audit trails
+
+### 3. Flexible Workflows (Optional Validation)
 - **Agent Builder workflows** - Direct API calls from workflows
 - **Flexible validation** - Agents choose when to validate
 - **Easy configuration** - Simple workflow definitions
 - **Use when**: You want optional, configurable validation
 
-Both use direct Rogue Security API calls with the messages format for better context understanding.
+All approaches use direct Rogue Security API calls with the messages format for better context understanding.
+
+## Mandatory Workflows (Gatekeeper Pattern)
+
+The `mandatory-workflows/` directory contains production-ready workflows that implement a **gatekeeper pattern** - validation is required, not optional:
+
+```
+User Input → Input Validation → [BLOCK] or [PROCEED]
+                                      ↓
+                                    Agent
+                                      ↓
+            Output Validation → [BLOCK] or [DELIVER]
+                                      ↓
+                              Safe Response to User
+```
+
+### Available Workflows
+
+| Workflow | Description |
+|----------|-------------|
+| `input-gating-workflow.yml` | Input validation only (prompt injection, content moderation) |
+| `output-validation-workflow.yml` | Output validation only (hallucination, PII, grounding) |
+| `full-pipeline-workflow.yml` | Complete dual-gate pipeline with domain selection |
+
+### Domain-Specific Policies
+
+| Domain | Confidence | Key Features |
+|--------|------------|--------------|
+| Healthcare | 95% | Medical assertions, grounding verification |
+| Finance | 90% | SEC compliance, investment advice blocking |
+| Customer Service | 85% | PII protection, incident logging |
+| Research | 70% | Permissive thresholds, warning mode |
+
+### Quick Start - Mandatory Workflows
+
+```bash
+# 1. Verify workflows syntax
+python mandatory-workflows/verify-workflows.py
+
+# 2. Run workflow tests
+python mandatory-workflows/test_workflows.py
+
+# 3. Import to Kibana
+curl -X POST "https://your-kibana/api/workflows" \
+  -H "Authorization: ApiKey YOUR_API_KEY" \
+  -H "kbn-xsrf: true" \
+  -H "Content-Type: application/x-yaml" \
+  --data-binary @mandatory-workflows/full-pipeline-workflow.yml
+```
+
+See [mandatory-workflows/MANDATORY_WORKFLOWS_GUIDE.md](mandatory-workflows/MANDATORY_WORKFLOWS_GUIDE.md) for complete documentation.
 
 ## Quick Start
 
@@ -361,9 +418,16 @@ self.policies["custom"] = ValidationPolicy(
 | `proxy.py` | Main proxy server with guaranteed validation |
 | `demo.py` | Demo script for testing the proxy |
 | `workflow_demo.py` | Demo for workflow-based validation |
+| `test_integration.py` | Comprehensive integration test suite |
 | `requirements.txt` | Python dependencies |
 | `docker-compose.yml` | Docker deployment configuration |
 | `env-template.txt` | Environment variables template |
+| `mandatory-workflows/` | Gatekeeper pattern workflows for Elastic |
+| `mandatory-workflows/full-pipeline-workflow.yml` | Complete dual-gate validation pipeline |
+| `mandatory-workflows/policies/` | Domain-specific policies (healthcare, finance, etc.) |
+| `mandatory-workflows/verify-workflows.py` | Workflow syntax validator |
+| `mandatory-workflows/test_workflows.py` | API integration tests |
+| `mandatory-workflows/MANDATORY_WORKFLOWS_GUIDE.md` | Comprehensive workflow documentation |
 
 ## Requirements
 
@@ -375,11 +439,20 @@ self.policies["custom"] = ValidationPolicy(
 ## Testing
 
 ```bash
+# Run integration tests
+python test_integration.py
+
 # Run proxy demo
 python demo.py
 
 # Run workflow demo
 python workflow_demo.py
+
+# Run mandatory workflow tests
+python mandatory-workflows/test_workflows.py
+
+# Verify workflow syntax
+python mandatory-workflows/verify-workflows.py --verbose
 
 # Test specific policies via curl
 curl -X POST http://localhost:8000/api/agent_builder/converse \

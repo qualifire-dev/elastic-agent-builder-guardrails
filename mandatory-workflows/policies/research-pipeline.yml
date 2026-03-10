@@ -1,32 +1,6 @@
-# =============================================================================
-# Research Pipeline Policy
-# =============================================================================
-# Academic/research use with more permissive thresholds but still mandatory
-# validation. Allows for more exploratory conversations while maintaining
-# basic safety guardrails.
-# =============================================================================
-
-version: "1"
 name: rogue-research-pipeline
-description: >
-  Research-oriented validation pipeline with relaxed thresholds for
-  academic and exploratory use cases. Still implements mandatory
-  validation but with different sensitivity settings.
+description: Research validation with permissive thresholds for academic use
 enabled: true
-
-tags:
-  - research
-  - academic
-  - exploratory
-  - permissive
-
-consts:
-  rogue_api_url: "https://api.rogue.security"
-  validation_timeout: "12s"
-  log_index: "rogue-research-logs"
-  # More permissive thresholds for research
-  input_confidence_threshold: 0.70
-  output_confidence_threshold: 0.70
 
 triggers:
   - type: manual
@@ -34,163 +8,76 @@ triggers:
 inputs:
   - name: user_input
     type: string
+    description: "The user's input message"
   - name: agent_id
     type: string
+    description: "Agent ID to execute"
   - name: session_id
     type: string
-  - name: researcher_id
-    type: string
-    default: "anonymous"
-  - name: research_project
-    type: string
-    default: ""
-    description: "Research project identifier"
-  - name: allow_speculative
-    type: boolean
-    default: true
-    description: "Allow more speculative responses"
-  - name: conversation_history
-    type: array
-    default: []
+    description: "Session identifier for tracking"
 
 steps:
-  # =========================================================================
-  # Input Validation - Basic safety only
-  # =========================================================================
-  - name: validate_research_input
+  - name: validate_input
     type: http
     with:
-      url: "{{ consts.rogue_api_url }}/api/v1/evaluation/evaluate"
+      url: "https://api.rogue.security/api/v1/evaluation/evaluate"
       method: POST
       headers:
         X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
         Content-Type: "application/json"
-        X-Domain: "research"
-      timeout: "{{ consts.validation_timeout }}"
-      body: |
-        {
-          "messages": [
-            {"role": "user", "content": "{{ inputs.user_input }}"}
-          ],
-          "prompt_injections": true,
-          "content_moderation_check": true,
-          "policy_target": "input"
-        }
+      body: '{"messages":[{"role":"user","content":"{{ inputs.user_input }}"}],"prompt_injections":true,"content_moderation_check":true,"policy_target":"input"}'
 
   - name: input_gate
     type: if
-    condition: "{{ steps.validate_research_input.output.data.status == 'success' }}"
+    condition: "steps.validate_input.output.body.data.status: success"
     steps:
-      - name: execute_research_agent
-        type: http
+      - name: call_agent
+        type: kibana.request
         with:
-          url: "{{ secrets.kibana_url }}/api/agent_builder/converse"
           method: POST
-          headers:
-            Authorization: "ApiKey {{ secrets.elastic_api_key }}"
-            Content-Type: "application/json"
-            kbn-xsrf: "true"
-          timeout: "90s"
-          body: |
-            {
-              "input": "{{ inputs.user_input }}",
-              "agent_id": "{{ inputs.agent_id }}",
-              "session_id": "{{ inputs.session_id }}",
-              "conversation_history": {{ inputs.conversation_history | json }},
-              "system_prompt": "You are a research assistant. You can engage in exploratory and speculative discussions while clearly distinguishing between established facts and hypotheses. Always cite sources when possible and acknowledge uncertainty."
-            }
+          path: /api/agent_builder/converse
+          body:
+            input: "{{ inputs.user_input }}"
+            agent_id: "{{ inputs.agent_id }}"
 
-      # Output validation - focus on content safety, less strict on hallucinations
-      - name: validate_research_output
+      - name: validate_output
         type: http
         with:
-          url: "{{ consts.rogue_api_url }}/api/v1/evaluation/evaluate"
+          url: "https://api.rogue.security/api/v1/evaluation/evaluate"
           method: POST
           headers:
             X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
             Content-Type: "application/json"
-            X-Domain: "research"
-          timeout: "{{ consts.validation_timeout }}"
-          body: |
-            {
-              "messages": [
-                {"role": "user", "content": "{{ inputs.user_input }}"},
-                {"role": "assistant", "content": "{{ steps.execute_research_agent.output.data.response }}"}
-              ],
-              "hallucinations_check": {{ inputs.allow_speculative | not }},
-              "content_moderation_check": true,
-              "pii_check": false,
-              "grounding_check": true,
-              "grounding_multi_turn_mode": true
-            }
-
-      - name: log_research_interaction
-        type: elasticsearch.index
-        with:
-          index: "{{ consts.log_index }}"
-          document:
-            timestamp: "{{ now }}"
-            workflow: "research-pipeline"
-            session_id: "{{ inputs.session_id }}"
-            researcher_id: "{{ inputs.researcher_id }}"
-            project: "{{ inputs.research_project }}"
-            speculative_allowed: "{{ inputs.allow_speculative }}"
-            input_score: "{{ steps.validate_research_input.output.data.score }}"
-            output_score: "{{ steps.validate_research_output.output.data.score }}"
+          body: '{"messages":[{"role":"user","content":"{{ inputs.user_input }}"},{"role":"assistant","content":"{{ steps.call_agent.output.response.message }}"}],"content_moderation_check":true,"grounding_check":true}'
 
       - name: output_gate
         type: if
-        condition: "{{ steps.validate_research_output.output.data.status == 'success' }}"
+        condition: "steps.validate_output.output.body.data.status: success"
         steps:
-          - name: return_research_response
+          - name: return_safe
             type: return
             with:
-              status: "success"
-              response: "{{ steps.execute_research_agent.output.data.response }}"
-              rogue_validation:
-                domain: "research"
-                input_passed: true
-                output_passed: true
-                speculative_content_allowed: "{{ inputs.allow_speculative }}"
-                grounding_checked: true
+              status: "delivered"
+              response: "{{ steps.call_agent.output.response.message }}"
+              domain: "research"
+              input_score: "{{ steps.validate_input.output.body.data.score }}"
+              output_score: "{{ steps.validate_output.output.body.data.score }}"
+
         else:
-          # For research, we still deliver but with warnings
-          - name: check_content_violation
-            type: if
-            condition: "{{ steps.validate_research_output.output.data.evaluationResults | contains: 'content_moderation' }}"
-            steps:
-              # Content violations are still blocked
-              - name: return_content_blocked
-                type: return
-                with:
-                  status: "blocked"
-                  response: "I cannot provide that content even in a research context. Please reformulate your query."
-                  rogue_validation:
-                    domain: "research"
-                    output_blocked: true
-                    block_reason: "content_policy"
-            else:
-              # For grounding/hallucination issues, deliver with warning
-              - name: return_with_warning
-                type: return
-                with:
-                  status: "warning"
-                  response: "{{ steps.execute_research_agent.output.data.response }}"
-                  warning: "This response may contain speculative or unverified information. Please verify claims against authoritative sources."
-                  rogue_validation:
-                    domain: "research"
-                    input_passed: true
-                    output_passed: false
-                    output_delivered_with_warning: true
-                    warning_reason: "grounding_or_hallucination_concerns"
-                    score: "{{ steps.validate_research_output.output.data.score }}"
+          - name: return_with_warning
+            type: return
+            with:
+              status: "warning"
+              response: "{{ steps.call_agent.output.response.message }}"
+              warning: "This response may contain speculative information. Please verify against authoritative sources."
+              domain: "research"
+              output_score: "{{ steps.validate_output.output.body.data.score }}"
+
     else:
-      - name: return_research_input_blocked
+      - name: return_input_blocked
         type: return
         with:
           status: "blocked"
-          response: "I cannot process this research query due to safety concerns. Please reformulate your question."
-          rogue_validation:
-            domain: "research"
-            input_blocked: true
-            agent_executed: false
+          response: "I cannot process this research query due to safety concerns. Please reformulate."
+          domain: "research"
+          input_score: "{{ steps.validate_input.output.body.data.score }}"

@@ -1,34 +1,6 @@
-# =============================================================================
-# Healthcare Pipeline Policy
-# =============================================================================
-# High-stakes medical validation with maximum safety requirements.
-# Implements strict controls to prevent medical misinformation.
-# =============================================================================
-
-version: "1"
 name: rogue-healthcare-pipeline
-description: >
-  Healthcare-specific mandatory validation pipeline with strict controls
-  for medical content. Prevents medical diagnoses, treatment recommendations,
-  and ensures all responses recommend professional consultation.
+description: Healthcare validation with strict medical safety assertions
 enabled: true
-
-tags:
-  - healthcare
-  - medical
-  - high-stakes
-  - hipaa
-  - regulated
-
-consts:
-  rogue_api_url: "https://api.rogue.security"
-  validation_timeout: "20s"
-  log_index: "rogue-healthcare-logs"
-  compliance_index: "rogue-healthcare-compliance"
-
-  # Healthcare-specific thresholds (very strict)
-  input_confidence_threshold: 0.95
-  output_confidence_threshold: 0.95
 
 triggers:
   - type: manual
@@ -36,156 +8,75 @@ triggers:
 inputs:
   - name: user_input
     type: string
+    description: "The user's input message"
   - name: agent_id
     type: string
+    description: "Agent ID to execute"
   - name: session_id
     type: string
-  - name: patient_context
-    type: string
-    default: ""
-    description: "Anonymized patient context (no PII)"
-  - name: conversation_history
-    type: array
-    default: []
+    description: "Session identifier for tracking"
 
 steps:
-  # =========================================================================
-  # Step 1: Input Validation with Healthcare-Specific Checks
-  # =========================================================================
-  - name: validate_healthcare_input
+  - name: validate_input
     type: http
     with:
-      url: "{{ consts.rogue_api_url }}/api/v1/evaluation/evaluate"
+      url: "https://api.rogue.security/api/v1/evaluation/evaluate"
       method: POST
       headers:
         X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
         Content-Type: "application/json"
-        X-Domain: "healthcare"
-      timeout: "{{ consts.validation_timeout }}"
-      body: |
-        {
-          "messages": [
-            {"role": "user", "content": "{{ inputs.user_input }}"}
-          ],
-          "prompt_injections": true,
-          "content_moderation_check": true,
-          "pii_check": true,
-          "policy_target": "input"
-        }
+      body: '{"messages":[{"role":"user","content":"{{ inputs.user_input }}"}],"prompt_injections":true,"content_moderation_check":true,"pii_check":true,"policy_target":"input"}'
 
-  - name: check_input_safe
+  - name: input_gate
     type: if
-    condition: "{{ steps.validate_healthcare_input.output.data.status == 'success' }}"
+    condition: "steps.validate_input.output.body.data.status: success"
     steps:
-      # Execute agent if input is safe
-      - name: execute_healthcare_agent
-        type: http
+      - name: call_agent
+        type: kibana.request
         with:
-          url: "{{ secrets.kibana_url }}/api/agent_builder/converse"
           method: POST
-          headers:
-            Authorization: "ApiKey {{ secrets.elastic_api_key }}"
-            Content-Type: "application/json"
-            kbn-xsrf: "true"
-          timeout: "60s"
-          body: |
-            {
-              "input": "{{ inputs.user_input }}",
-              "agent_id": "{{ inputs.agent_id }}",
-              "session_id": "{{ inputs.session_id }}",
-              "system_prompt": "You are a healthcare information assistant. You MUST NOT provide medical diagnoses, prescribe treatments, or give specific medical advice. Always recommend consulting healthcare professionals."
-            }
+          path: /api/agent_builder/converse
+          body:
+            input: "{{ inputs.user_input }}"
+            agent_id: "{{ inputs.agent_id }}"
 
-      # Validate output with healthcare-specific assertions
-      - name: validate_healthcare_output
+      - name: validate_output
         type: http
         with:
-          url: "{{ consts.rogue_api_url }}/api/v1/evaluation/evaluate"
+          url: "https://api.rogue.security/api/v1/evaluation/evaluate"
           method: POST
           headers:
             X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
             Content-Type: "application/json"
-            X-Domain: "healthcare"
-          timeout: "{{ consts.validation_timeout }}"
-          body: |
-            {
-              "messages": [
-                {"role": "user", "content": "{{ inputs.user_input }}"},
-                {"role": "assistant", "content": "{{ steps.execute_healthcare_agent.output.data.response }}"}
-              ],
-              "hallucinations_check": true,
-              "content_moderation_check": true,
-              "pii_check": true,
-              "grounding_check": true,
-              "assertions": [
-                "The response must not provide specific medical diagnoses",
-                "The response must not prescribe medications or dosages",
-                "The response must not recommend specific medical treatments",
-                "The response must recommend consulting healthcare professionals for medical concerns",
-                "The response must include appropriate medical disclaimers",
-                "The response must not claim to replace professional medical advice"
-              ]
-            }
+          body: '{"messages":[{"role":"user","content":"{{ inputs.user_input }}"},{"role":"assistant","content":"{{ steps.call_agent.output.response.message }}"}],"hallucinations_check":true,"content_moderation_check":true,"pii_check":true,"grounding_check":true,"assertions":["The response must not provide specific medical diagnoses","The response must not prescribe medications or dosages","The response must recommend consulting healthcare professionals"]}'
 
-      - name: log_healthcare_validation
-        type: elasticsearch.index
-        with:
-          index: "{{ consts.compliance_index }}"
-          document:
-            timestamp: "{{ now }}"
-            workflow: "healthcare-pipeline"
-            session_id: "{{ inputs.session_id }}"
-            input_score: "{{ steps.validate_healthcare_input.output.data.score }}"
-            output_score: "{{ steps.validate_healthcare_output.output.data.score }}"
-            assertions_checked: 6
-            compliance_status: "{{ steps.validate_healthcare_output.output.data.status }}"
-
-      - name: check_output_safe
+      - name: output_gate
         type: if
-        condition: "{{ steps.validate_healthcare_output.output.data.status == 'success' }}"
+        condition: "steps.validate_output.output.body.data.status: success"
         steps:
-          - name: return_validated_healthcare_response
+          - name: return_safe
             type: return
             with:
-              status: "success"
-              response: "{{ steps.execute_healthcare_agent.output.data.response }}"
-              rogue_validation:
-                domain: "healthcare"
-                input_passed: true
-                output_passed: true
-                assertions_passed: true
-                hipaa_compliant: true
-        else:
-          - name: log_healthcare_block
-            type: elasticsearch.index
-            with:
-              index: "{{ consts.compliance_index }}"
-              document:
-                timestamp: "{{ now }}"
-                workflow: "healthcare-pipeline"
-                session_id: "{{ inputs.session_id }}"
-                decision: "blocked"
-                reason: "Healthcare safety assertions failed"
-                failed_assertions: "{{ steps.validate_healthcare_output.output.data.evaluationResults }}"
-                severity: "critical"
+              status: "delivered"
+              response: "{{ steps.call_agent.output.response.message }}"
+              domain: "healthcare"
+              input_score: "{{ steps.validate_input.output.body.data.score }}"
+              output_score: "{{ steps.validate_output.output.body.data.score }}"
 
-          - name: return_healthcare_safe_response
+        else:
+          - name: return_output_blocked
             type: return
             with:
               status: "blocked"
-              response: "I'm not able to provide specific medical advice or diagnoses. For any health concerns, please consult with a qualified healthcare professional who can properly evaluate your situation. If you're experiencing a medical emergency, please call emergency services immediately."
-              rogue_validation:
-                domain: "healthcare"
-                input_passed: true
-                output_blocked: true
-                block_reason: "healthcare_safety_assertions_failed"
+              response: "I cannot provide specific medical advice or diagnoses. Please consult with a qualified healthcare professional."
+              domain: "healthcare"
+              output_score: "{{ steps.validate_output.output.body.data.score }}"
+
     else:
       - name: return_input_blocked
         type: return
         with:
           status: "blocked"
-          response: "I cannot process this request. For medical questions, please consult with a qualified healthcare professional."
-          rogue_validation:
-            domain: "healthcare"
-            input_blocked: true
-            agent_executed: false
+          response: "I cannot process this request. For medical questions, please consult a healthcare professional."
+          domain: "healthcare"
+          input_score: "{{ steps.validate_input.output.body.data.score }}"

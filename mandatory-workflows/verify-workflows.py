@@ -65,8 +65,8 @@ VALID_STEP_TYPES = {
     "ai.chat",
 }
 
-REQUIRED_WORKFLOW_FIELDS = {"version", "name"}
-RECOMMENDED_WORKFLOW_FIELDS = {"description", "enabled", "triggers", "steps"}
+REQUIRED_WORKFLOW_FIELDS = {"name"}
+RECOMMENDED_WORKFLOW_FIELDS = {"description", "enabled", "triggers", "steps", "inputs"}
 
 REQUIRED_STEP_FIELDS = {"name", "type"}
 
@@ -135,11 +135,11 @@ def validate_workflow_structure(data: Dict) -> ValidationResult:
         if field not in data:
             result.warnings.append(f"Missing recommended field: '{field}'")
 
-    # Validate version
+    # Validate version (optional)
     if "version" in data:
         version = str(data["version"])
         if version not in ["1", "1.0", "\"1\""]:
-            result.warnings.append(f"Unexpected version: '{version}' (expected '1')")
+            result.info.append(f"Version specified: '{version}'")
 
     # Validate enabled field
     if "enabled" in data and not isinstance(data["enabled"], bool):
