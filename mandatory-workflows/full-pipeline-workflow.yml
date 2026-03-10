@@ -1,0 +1,496 @@
+# =============================================================================
+# Full Pipeline Workflow - Complete Mandatory Validation
+# =============================================================================
+# This workflow implements the COMPLETE mandatory validation pipeline:
+# 1. Input Validation - Block unsafe inputs BEFORE agent execution
+# 2. Agent Execution - Only execute if input is safe
+# 3. Output Validation - Block unsafe outputs BEFORE delivery
+# 4. Safe Response - Only deliver validated responses
+#
+# Pattern: Input -> Validate -> Agent -> Validate -> Response
+#          [BLOCK]           [BLOCK]
+# =============================================================================
+
+version: "1"
+name: rogue-full-pipeline
+description: >
+  Complete mandatory validation pipeline that implements both input gating
+  and output validation. This is the most secure configuration - no unsafe
+  content can reach the agent OR the user.
+enabled: true
+
+tags:
+  - security
+  - full-pipeline
+  - mandatory
+  - gatekeeper
+  - input-validation
+  - output-validation
+  - enterprise
+
+# Configuration constants
+consts:
+  rogue_api_url: "https://api.rogue.security"
+  input_validation_timeout: "10s"
+  output_validation_timeout: "15s"
+  agent_timeout: "60s"
+  log_index: "rogue-validation-logs"
+  metrics_index: "rogue-validation-metrics"
+
+triggers:
+  - type: manual
+
+# Input parameters
+inputs:
+  - name: user_input
+    type: string
+    description: "The user's input message"
+  - name: agent_id
+    type: string
+    description: "Target agent ID"
+  - name: session_id
+    type: string
+    description: "Session identifier"
+  - name: user_id
+    type: string
+    default: "anonymous"
+  - name: conversation_history
+    type: array
+    default: []
+    description: "Previous conversation context"
+  - name: system_prompt
+    type: string
+    default: ""
+    description: "System prompt for the agent"
+  - name: domain
+    type: string
+    default: "general"
+    description: "Domain (healthcare, finance, legal, customer_service, general)"
+  - name: policy_override
+    type: string
+    default: ""
+    description: "Override default policy selection"
+
+steps:
+  # =========================================================================
+  # PHASE 1: Domain-Based Policy Selection
+  # =========================================================================
+  - name: select_policy
+    type: if
+    condition: "{{ inputs.policy_override != '' }}"
+    steps:
+      - name: use_override_policy
+        type: set
+        with:
+          active_policy: "{{ inputs.policy_override }}"
+    else:
+      - name: select_by_domain
+        type: if
+        condition: "{{ inputs.domain == 'healthcare' }}"
+        steps:
+          - name: set_healthcare_policy
+            type: set
+            with:
+              active_policy: "healthcare"
+              input_checks:
+                prompt_injections: true
+                content_moderation: true
+              output_checks:
+                hallucinations: true
+                content_moderation: true
+                pii: true
+                grounding: true
+              confidence_threshold: 0.95
+              assertions:
+                - "Must not provide specific medical diagnoses"
+                - "Must recommend consulting healthcare professionals"
+                - "Must not prescribe medications or treatments"
+        else:
+          - name: check_finance_domain
+            type: if
+            condition: "{{ inputs.domain == 'finance' }}"
+            steps:
+              - name: set_finance_policy
+                type: set
+                with:
+                  active_policy: "finance"
+                  input_checks:
+                    prompt_injections: true
+                    content_moderation: true
+                  output_checks:
+                    hallucinations: true
+                    content_moderation: true
+                    pii: true
+                  confidence_threshold: 0.90
+                  assertions:
+                    - "Must not guarantee investment returns"
+                    - "Must include risk disclosures"
+                    - "Must recommend consulting financial advisors"
+                    - "Must not provide specific investment advice"
+            else:
+              - name: check_legal_domain
+                type: if
+                condition: "{{ inputs.domain == 'legal' }}"
+                steps:
+                  - name: set_legal_policy
+                    type: set
+                    with:
+                      active_policy: "legal"
+                      input_checks:
+                        prompt_injections: true
+                        content_moderation: true
+                      output_checks:
+                        hallucinations: true
+                        content_moderation: true
+                      confidence_threshold: 0.90
+                      assertions:
+                        - "Must not provide specific legal advice"
+                        - "Must recommend consulting legal professionals"
+                        - "Must include jurisdiction disclaimers"
+                else:
+                  - name: check_customer_service_domain
+                    type: if
+                    condition: "{{ inputs.domain == 'customer_service' }}"
+                    steps:
+                      - name: set_customer_service_policy
+                        type: set
+                        with:
+                          active_policy: "customer_service"
+                          input_checks:
+                            prompt_injections: true
+                            content_moderation: true
+                          output_checks:
+                            hallucinations: true
+                            content_moderation: true
+                            pii: true
+                          confidence_threshold: 0.85
+                    else:
+                      - name: set_default_policy
+                        type: set
+                        with:
+                          active_policy: "default"
+                          input_checks:
+                            prompt_injections: true
+                            content_moderation: true
+                          output_checks:
+                            hallucinations: true
+                            content_moderation: true
+                          confidence_threshold: 0.80
+
+  # =========================================================================
+  # PHASE 2: Input Validation (MANDATORY GATE)
+  # =========================================================================
+  - name: validate_input
+    type: http
+    with:
+      url: "{{ consts.rogue_api_url }}/api/v1/evaluation/evaluate"
+      method: POST
+      headers:
+        X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
+        Content-Type: "application/json"
+        X-Request-ID: "{{ inputs.session_id }}-input"
+        X-Workflow: "full-pipeline"
+        X-Phase: "input-validation"
+      timeout: "{{ consts.input_validation_timeout }}"
+      body: |
+        {
+          "messages": [
+            {"role": "user", "content": "{{ inputs.user_input }}"}
+          ],
+          "prompt_injections": true,
+          "content_moderation_check": true,
+          "policy_target": "input"
+        }
+
+  - name: log_input_validation
+    type: elasticsearch.index
+    with:
+      index: "{{ consts.log_index }}"
+      document:
+        timestamp: "{{ steps.validate_input.output.timestamp }}"
+        workflow: "full-pipeline"
+        phase: "input-validation"
+        session_id: "{{ inputs.session_id }}"
+        user_id: "{{ inputs.user_id }}"
+        domain: "{{ inputs.domain }}"
+        policy: "{{ steps.select_policy.output.active_policy }}"
+        input_preview: "{{ inputs.user_input | truncate: 100 }}"
+        score: "{{ steps.validate_input.output.data.score }}"
+        status: "{{ steps.validate_input.output.data.status }}"
+
+  # =========================================================================
+  # PHASE 2B: Input Gate Decision
+  # =========================================================================
+  - name: input_gate
+    type: if
+    condition: "{{ steps.validate_input.output.data.status == 'success' }}"
+
+    # INPUT PASSED - Proceed to agent
+    steps:
+      - name: log_input_passed
+        type: console
+        with:
+          message: "Input validation PASSED - proceeding to agent execution"
+
+      # =====================================================================
+      # PHASE 3: Agent Execution
+      # =====================================================================
+      - name: execute_agent
+        type: http
+        with:
+          url: "{{ secrets.kibana_url }}/api/agent_builder/converse"
+          method: POST
+          headers:
+            Authorization: "ApiKey {{ secrets.elastic_api_key }}"
+            Content-Type: "application/json"
+            kbn-xsrf: "true"
+          timeout: "{{ consts.agent_timeout }}"
+          body: |
+            {
+              "input": "{{ inputs.user_input }}",
+              "agent_id": "{{ inputs.agent_id }}",
+              "session_id": "{{ inputs.session_id }}",
+              "conversation_history": {{ inputs.conversation_history | json }},
+              "system_prompt": "{{ inputs.system_prompt }}"
+            }
+
+      - name: log_agent_execution
+        type: elasticsearch.index
+        with:
+          index: "{{ consts.log_index }}"
+          document:
+            timestamp: "{{ steps.execute_agent.output.timestamp }}"
+            workflow: "full-pipeline"
+            phase: "agent-execution"
+            session_id: "{{ inputs.session_id }}"
+            agent_id: "{{ inputs.agent_id }}"
+            response_preview: "{{ steps.execute_agent.output.data.response | truncate: 100 }}"
+
+      # =====================================================================
+      # PHASE 4: Output Validation (MANDATORY GATE)
+      # =====================================================================
+      - name: build_output_messages
+        type: set
+        with:
+          output_messages: |
+            [
+              {% if inputs.system_prompt != '' %}
+              {"role": "system", "content": "{{ inputs.system_prompt }}"},
+              {% endif %}
+              {% for msg in inputs.conversation_history %}
+              {"role": "{{ msg.role }}", "content": "{{ msg.content }}"},
+              {% endfor %}
+              {"role": "user", "content": "{{ inputs.user_input }}"},
+              {"role": "assistant", "content": "{{ steps.execute_agent.output.data.response }}"}
+            ]
+
+      - name: validate_output
+        type: http
+        with:
+          url: "{{ consts.rogue_api_url }}/api/v1/evaluation/evaluate"
+          method: POST
+          headers:
+            X-Rogue-API-Key: "{{ secrets.rogue_api_key }}"
+            Content-Type: "application/json"
+            X-Request-ID: "{{ inputs.session_id }}-output"
+            X-Workflow: "full-pipeline"
+            X-Phase: "output-validation"
+          timeout: "{{ consts.output_validation_timeout }}"
+          body: |
+            {
+              "messages": {{ steps.build_output_messages.output.output_messages | json }},
+              "hallucinations_check": true,
+              "content_moderation_check": true,
+              "pii_check": {{ steps.select_policy.output.output_checks.pii | default: false }},
+              "grounding_check": {{ steps.select_policy.output.output_checks.grounding | default: false }},
+              "grounding_multi_turn_mode": true,
+              "assertions": {{ steps.select_policy.output.assertions | default: [] | json }}
+            }
+
+      - name: log_output_validation
+        type: elasticsearch.index
+        with:
+          index: "{{ consts.log_index }}"
+          document:
+            timestamp: "{{ steps.validate_output.output.timestamp }}"
+            workflow: "full-pipeline"
+            phase: "output-validation"
+            session_id: "{{ inputs.session_id }}"
+            score: "{{ steps.validate_output.output.data.score }}"
+            status: "{{ steps.validate_output.output.data.status }}"
+            evaluation_results: "{{ steps.validate_output.output.data.evaluationResults }}"
+
+      # =====================================================================
+      # PHASE 4B: Output Gate Decision
+      # =====================================================================
+      - name: output_gate
+        type: if
+        condition: "{{ steps.validate_output.output.data.status == 'success' }}"
+
+        # OUTPUT PASSED - Deliver response
+        steps:
+          - name: log_pipeline_success
+            type: elasticsearch.index
+            with:
+              index: "{{ consts.metrics_index }}"
+              document:
+                timestamp: "{{ now }}"
+                workflow: "full-pipeline"
+                session_id: "{{ inputs.session_id }}"
+                outcome: "success"
+                input_score: "{{ steps.validate_input.output.data.score }}"
+                output_score: "{{ steps.validate_output.output.data.score }}"
+                policy: "{{ steps.select_policy.output.active_policy }}"
+                domain: "{{ inputs.domain }}"
+
+          - name: return_success
+            type: return
+            with:
+              status: "success"
+              response: "{{ steps.execute_agent.output.data.response }}"
+              rogue_validation:
+                pipeline: "full"
+                input_validated: true
+                input_passed: true
+                input_score: "{{ steps.validate_input.output.data.score }}"
+                agent_executed: true
+                output_validated: true
+                output_passed: true
+                output_score: "{{ steps.validate_output.output.data.score }}"
+                policy_applied: "{{ steps.select_policy.output.active_policy }}"
+                domain: "{{ inputs.domain }}"
+
+        # OUTPUT FAILED - Block and replace
+        else:
+          - name: log_output_blocked
+            type: elasticsearch.index
+            with:
+              index: "{{ consts.log_index }}"
+              document:
+                timestamp: "{{ now }}"
+                workflow: "full-pipeline"
+                phase: "output-blocked"
+                session_id: "{{ inputs.session_id }}"
+                decision: "blocked"
+                reason: "Output failed safety validation"
+                score: "{{ steps.validate_output.output.data.score }}"
+                failed_checks: "{{ steps.validate_output.output.data.evaluationResults }}"
+
+          - name: log_pipeline_output_blocked
+            type: elasticsearch.index
+            with:
+              index: "{{ consts.metrics_index }}"
+              document:
+                timestamp: "{{ now }}"
+                workflow: "full-pipeline"
+                session_id: "{{ inputs.session_id }}"
+                outcome: "output_blocked"
+                input_score: "{{ steps.validate_input.output.data.score }}"
+                output_score: "{{ steps.validate_output.output.data.score }}"
+                block_phase: "output"
+
+          - name: generate_output_safe_response
+            type: set
+            with:
+              safe_response: "I need to be more careful with my response to ensure accuracy and safety. How can I better help you with your request?"
+
+          - name: return_output_blocked
+            type: return
+            with:
+              status: "blocked"
+              response: "{{ steps.generate_output_safe_response.output.safe_response }}"
+              rogue_validation:
+                pipeline: "full"
+                input_validated: true
+                input_passed: true
+                input_score: "{{ steps.validate_input.output.data.score }}"
+                agent_executed: true
+                output_validated: true
+                output_passed: false
+                output_blocked: true
+                output_score: "{{ steps.validate_output.output.data.score }}"
+                block_reason: "output_safety_validation_failed"
+                policy_applied: "{{ steps.select_policy.output.active_policy }}"
+
+    # INPUT FAILED - Block immediately (agent never executes)
+    else:
+      - name: log_input_blocked
+        type: elasticsearch.index
+        with:
+          index: "{{ consts.log_index }}"
+          document:
+            timestamp: "{{ now }}"
+            workflow: "full-pipeline"
+            phase: "input-blocked"
+            session_id: "{{ inputs.session_id }}"
+            user_id: "{{ inputs.user_id }}"
+            decision: "blocked"
+            reason: "Input failed safety validation - agent NOT executed"
+            score: "{{ steps.validate_input.output.data.score }}"
+            failed_checks: "{{ steps.validate_input.output.data.evaluationResults }}"
+            severity: "high"
+
+      - name: log_pipeline_input_blocked
+        type: elasticsearch.index
+        with:
+          index: "{{ consts.metrics_index }}"
+          document:
+            timestamp: "{{ now }}"
+            workflow: "full-pipeline"
+            session_id: "{{ inputs.session_id }}"
+            outcome: "input_blocked"
+            input_score: "{{ steps.validate_input.output.data.score }}"
+            block_phase: "input"
+            agent_executed: false
+
+      - name: return_input_blocked
+        type: return
+        with:
+          status: "blocked"
+          response: "I noticed something in your request that I cannot process. Please rephrase your question and I'll be happy to help."
+          rogue_validation:
+            pipeline: "full"
+            input_validated: true
+            input_passed: false
+            input_blocked: true
+            input_score: "{{ steps.validate_input.output.data.score }}"
+            block_reason: "input_safety_validation_failed"
+            agent_executed: false
+            output_validated: false
+            policy_applied: "{{ steps.select_policy.output.active_policy }}"
+
+# Error handling
+on_error:
+  - name: log_pipeline_error
+    type: elasticsearch.index
+    with:
+      index: "{{ consts.log_index }}-errors"
+      document:
+        timestamp: "{{ now }}"
+        workflow: "full-pipeline"
+        session_id: "{{ inputs.session_id }}"
+        error: "{{ error.message }}"
+        step: "{{ error.step }}"
+        phase: "{{ error.phase }}"
+
+  - name: log_error_metric
+    type: elasticsearch.index
+    with:
+      index: "{{ consts.metrics_index }}"
+      document:
+        timestamp: "{{ now }}"
+        workflow: "full-pipeline"
+        session_id: "{{ inputs.session_id }}"
+        outcome: "error"
+        error_step: "{{ error.step }}"
+
+  - name: return_error
+    type: return
+    with:
+      status: "error"
+      response: "I apologize, but I'm experiencing technical difficulties and cannot process your request safely. Please try again in a moment."
+      rogue_validation:
+        pipeline: "full"
+        error: true
+        error_message: "{{ error.message }}"
+        fallback_used: true
