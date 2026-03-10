@@ -1,10 +1,10 @@
-# Qualifire + Elastic Agent Builder POC Configuration
+# Rogue Security + Elastic Agent Builder POC Configuration
 # Copy this to .env and fill in your actual values
 
-# Qualifire Configuration
-QUALIFIRE_API_KEY=your_qualifire_api_key_here
-QUALIFIRE_API_URL=https://api.qualifire.ai
-QUALIFIRE_TIMEOUT=15
+# Rogue Security Configuration
+ROGUE_API_KEY=your_rogue_api_key_here
+ROGUE_API_URL=https://api.rogue.security
+ROGUE_TIMEOUT=15
 
 # Elastic Configuration
 KIBANA_URL=https://your-deployment.elastic-cloud.com

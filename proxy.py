@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Qualifire + Elastic Agent Builder Proxy
-=======================================
+Rogue Security + Elastic Agent Builder Proxy
+=============================================
 
 API proxy that intercepts all Elastic Agent Builder responses
-and validates them through Qualifire guardrails using direct API calls.
+and validates them through Rogue Security guardrails using direct API calls.
 
 This ensures NO response can bypass validation.
 """
@@ -28,8 +28,8 @@ import uvicorn
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Qualifire API configuration
-QUALIFIRE_API_URL = os.getenv("QUALIFIRE_API_URL", "https://api.qualifire.ai")
+# Rogue Security API configuration
+ROGUE_API_URL = os.getenv("ROGUE_API_URL", "https://api.rogue.security")
 
 
 @dataclass
@@ -49,16 +49,16 @@ class ValidationPolicy:
     policy_target: str = None
 
 
-class QualifireAPIClient:
-    """Direct HTTP client for Qualifire API"""
+class RogueAPIClient:
+    """Direct HTTP client for Rogue Security API"""
 
     def __init__(self, api_key: str, base_url: str = None):
         self.api_key = api_key
-        self.base_url = (base_url or QUALIFIRE_API_URL).rstrip("/")
+        self.base_url = (base_url or ROGUE_API_URL).rstrip("/")
         self.client = httpx.AsyncClient(
             timeout=30.0,
             headers={
-                "X-Qualifire-API-Key": api_key,
+                "X-Rogue-API-Key": api_key,
                 "Content-Type": "application/json"
             }
         )
@@ -76,7 +76,7 @@ class QualifireAPIClient:
         assertions: List[str] = None,
         policy_target: str = None
     ) -> Dict[str, Any]:
-        """Call Qualifire evaluation API"""
+        """Call Rogue Security evaluation API"""
 
         payload = {
             "messages": messages,
@@ -104,7 +104,7 @@ class QualifireAPIClient:
 
         if response.status_code != 200:
             error_text = response.text
-            raise Exception(f"Qualifire API error {response.status_code}: {error_text}")
+            raise Exception(f"Rogue Security API error {response.status_code}: {error_text}")
 
         return response.json()
 
@@ -115,12 +115,12 @@ class QualifireAPIClient:
 class ElasticProxy:
     """Main proxy that intercepts and validates all Agent Builder responses"""
 
-    def __init__(self, kibana_url: str, elastic_api_key: str, qualifire_api_key: str):
+    def __init__(self, kibana_url: str, elastic_api_key: str, rogue_api_key: str):
         self.kibana_url = kibana_url.rstrip("/")
         self.elastic_api_key = elastic_api_key
 
-        # Initialize Qualifire API client
-        self.qualifire_client = QualifireAPIClient(api_key=qualifire_api_key)
+        # Initialize Rogue Security API client
+        self.rogue_client = RogueAPIClient(api_key=rogue_api_key)
 
         # HTTP client for Elastic API
         self.elastic_client = httpx.AsyncClient(
@@ -210,7 +210,7 @@ class ElasticProxy:
 
     async def close(self):
         await self.elastic_client.aclose()
-        await self.qualifire_client.close()
+        await self.rogue_client.close()
 
     def build_conversation_messages(
         self,
@@ -275,7 +275,7 @@ class ElasticProxy:
         context: Dict[str, Any],
         request_data: Dict[str, Any] = None
     ) -> Dict[str, Any]:
-        """Validate agent response through Qualifire API using messages format"""
+        """Validate agent response through Rogue Security API using messages format"""
 
         if not response_text.strip():
             return {"response": response_text, "validation_applied": False}
@@ -316,12 +316,20 @@ class ElasticProxy:
             if policy.policy_target:
                 eval_kwargs["policy_target"] = policy.policy_target
 
-            result = await self.qualifire_client.evaluate(**eval_kwargs)
+            # Log Rogue Security request for debugging
+            logger.info(f"Rogue Security API request: {json.dumps(eval_kwargs, indent=2)}")
+
+            result = await self.rogue_client.evaluate(**eval_kwargs)
 
             validation_time = (time.time() - start_time) * 1000
 
+            # Log Rogue Security response for debugging
+            logger.info(f"Rogue Security API response: {json.dumps(result, indent=2)}")
+
             # Parse results from Qualifire API
-            overall_score = result.get("score") or 0
+            # Overall score from API is in 0-100 range, normalize to 0-1 for consistent comparison
+            raw_overall_score = result.get("score") or 0
+            overall_score = raw_overall_score / 100 if raw_overall_score > 1 else raw_overall_score
             failed_checks = []
             check_details = {}
 
@@ -340,20 +348,24 @@ class ElasticProxy:
                         "confidence_score": check.get("confidence_score")
                     })
 
-                    # Check if this failed based on score and policy threshold
-                    check_score = check.get("score", 0)
-                    if check_score < (policy.confidence_threshold * 100) or check.get("flagged", False):
+                    # Only fail if Rogue Security explicitly flags the check
+                    is_flagged = check.get("flagged", False)
+
+                    if is_flagged:
                         failed_checks.append({
                             "check_type": check_type,
                             "name": check.get("name", ""),
-                            "score": check_score,
-                            "flagged": check.get("flagged", False),
+                            "score": check.get("score", 0),
+                            "flagged": True,
                             "reason": check.get("reason", "Check failed"),
                             "label": check.get("label", "")
                         })
 
             # Determine if response should be blocked
-            overall_passed = len(failed_checks) == 0 and overall_score >= (policy.confidence_threshold * 100)
+            # Only block if any check was explicitly flagged by Rogue Security
+            overall_passed = len(failed_checks) == 0
+
+            logger.info(f"Validation decision: overall_score={overall_score}, flagged_checks={len(failed_checks)}, passed={overall_passed}")
 
             validation_metadata = {
                 "validation_applied": True,
@@ -379,7 +391,7 @@ class ElasticProxy:
                     "validation_status": "blocked_and_replaced",
                     "original_blocked": True,
                     "failed_checks": failed_checks,
-                    "block_reason": "Response failed Qualifire safety validation",
+                    "block_reason": "Response failed Rogue Security safety validation",
                     **validation_metadata
                 }
 
@@ -393,7 +405,7 @@ class ElasticProxy:
                 }
 
         except Exception as e:
-            logger.error(f"Qualifire validation failed: {e}")
+            logger.error(f"Rogue Security validation failed: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             validation_time = (time.time() - start_time) * 1000
 
@@ -538,7 +550,7 @@ class ElasticProxy:
                 return JSONResponse(content=response_data, status_code=elastic_response["status_code"])
 
             if agent_response:
-                # Validate response using Qualifire API
+                # Validate response using Rogue Security API
                 validation_result = await self.validate_response(
                     response_text=agent_response,
                     user_input=request_data.get("input", ""),
@@ -558,7 +570,7 @@ class ElasticProxy:
                 else:
                     response_data["response"] = validated_text
 
-                response_data["qualifire_validation"] = {
+                response_data["rogue_validation"] = {
                     k: v for k, v in validation_result.items() if k != "response"
                 }
 
@@ -573,8 +585,8 @@ class ElasticProxy:
 
 # FastAPI app
 app = FastAPI(
-    title="Qualifire + Elastic Agent Builder Proxy",
-    description="Guaranteed guardrail validation for all Agent Builder responses using Qualifire API",
+    title="Rogue Security + Elastic Agent Builder Proxy",
+    description="Guaranteed guardrail validation for all Agent Builder responses using Rogue Security API",
     version="1.0.0"
 )
 
@@ -596,18 +608,18 @@ async def startup():
 
     load_dotenv()
 
-    qualifire_api_key = os.getenv("QUALIFIRE_API_KEY")
+    rogue_api_key = os.getenv("ROGUE_API_KEY")
     kibana_url = os.getenv("KIBANA_URL")
     elastic_api_key = os.getenv("ELASTIC_API_KEY")
 
-    if not all([qualifire_api_key, kibana_url, elastic_api_key]):
+    if not all([rogue_api_key, kibana_url, elastic_api_key]):
         raise RuntimeError(
-            "Missing required environment variables: QUALIFIRE_API_KEY, KIBANA_URL, ELASTIC_API_KEY"
+            "Missing required environment variables: ROGUE_API_KEY, KIBANA_URL, ELASTIC_API_KEY"
         )
 
-    proxy = ElasticProxy(kibana_url, elastic_api_key, qualifire_api_key)
+    proxy = ElasticProxy(kibana_url, elastic_api_key, rogue_api_key)
 
-    logger.info("Qualifire proxy started with direct API calls - all responses will be validated")
+    logger.info("Rogue Security proxy started with direct API calls - all responses will be validated")
 
 
 @app.on_event("shutdown")
@@ -621,7 +633,7 @@ async def shutdown():
 async def health():
     return {
         "status": "healthy",
-        "service": "qualifire-elastic-proxy",
+        "service": "rogue-elastic-proxy",
         "api_version": "v1",
         "timestamp": datetime.utcnow().isoformat()
     }
@@ -629,7 +641,7 @@ async def health():
 
 @app.post("/api/agent_builder/converse")
 async def converse_with_validation(request: Request):
-    """Converse endpoint with guaranteed Qualifire validation"""
+    """Converse endpoint with guaranteed Rogue Security validation"""
 
     if not proxy:
         raise HTTPException(status_code=503, detail="Proxy not ready")
@@ -648,8 +660,8 @@ async def converse_with_validation(request: Request):
     if request.headers.get("x-domain"):
         context["domain"] = request.headers.get("x-domain")
 
-    if request.headers.get("x-qualifire-policy"):
-        policy_name = request.headers.get("x-qualifire-policy")
+    if request.headers.get("x-rogue-policy"):
+        policy_name = request.headers.get("x-rogue-policy")
         if policy_name in proxy.policies:
             context["policy_override"] = policy_name
 
@@ -721,13 +733,13 @@ async def list_policies():
 
 @app.get("/validate/test")
 async def test_validation():
-    """Test endpoint to verify Qualifire API integration"""
+    """Test endpoint to verify Rogue Security API integration"""
 
     if not proxy:
         raise HTTPException(status_code=503, detail="Proxy not ready")
 
     try:
-        result = await proxy.qualifire_client.evaluate(
+        result = await proxy.rogue_client.evaluate(
             messages=[
                 {"role": "user", "content": "What is 2+2?"},
                 {"role": "assistant", "content": "2+2 equals 4."}

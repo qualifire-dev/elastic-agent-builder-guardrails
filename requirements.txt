@@ -1,7 +1,4 @@
-# Qualifire + Elastic Agent Builder Proxy Requirements
-
-# Official Qualifire Python SDK
-qualifire==0.15.0
+# Rogue Security + Elastic Agent Builder Proxy Requirements
 
 # FastAPI and server dependencies
 fastapi==0.104.1
@@ -10,6 +7,10 @@ uvicorn==0.24.0
 # HTTP client
 httpx==0.25.2
 
-# Environment configuration  
+# Environment configuration
 python-dotenv==1.0.0
 requests
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1

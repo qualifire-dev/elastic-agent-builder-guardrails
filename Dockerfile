@@ -1,4 +1,4 @@
-# Qualifire + Elastic Agent Builder Proxy
+# Rogue Security + Elastic Agent Builder Proxy
 # Production-ready Docker image
 
 FROM python:3.10-slim

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Qualifire + Elastic Agent Builder Workflows Integration Demo
-===========================================================
+Rogue Security + Elastic Agent Builder Workflows Integration Demo
+=================================================================
 
-This demo shows how to integrate Qualifire safety validation using
+This demo shows how to integrate Rogue Security safety validation using
 direct API calls within Elastic Agent Builder workflows.
 
 This approach is complementary to the API proxy - workflows provide
 flexible, optional validation while the proxy provides guaranteed validation.
 
 Architecture:
-Agent Builder -> Workflow -> Qualifire API -> Validation Result
+Agent Builder -> Workflow -> Rogue Security API -> Validation Result
 """
 
 from typing import Dict, Any, List
@@ -22,20 +22,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration
-QUALIFIRE_API_KEY = os.getenv("QUALIFIRE_API_KEY")
-QUALIFIRE_API_URL = os.getenv("QUALIFIRE_API_URL", "https://api.qualifire.ai")
+ROGUE_API_KEY = os.getenv("ROGUE_API_KEY")
+ROGUE_API_URL = os.getenv("ROGUE_API_URL", "https://api.rogue.security")
 
 
-class QualifireAPIClient:
-    """Direct HTTP client for Qualifire API"""
+class RogueAPIClient:
+    """Direct HTTP client for Rogue Security API"""
 
     def __init__(self, api_key: str, base_url: str = None):
         self.api_key = api_key
-        self.base_url = (base_url or QUALIFIRE_API_URL).rstrip("/")
+        self.base_url = (base_url or ROGUE_API_URL).rstrip("/")
         self.client = httpx.Client(
             timeout=30.0,
             headers={
-                "X-Qualifire-API-Key": api_key,
+                "X-Rogue-API-Key": api_key,
                 "Content-Type": "application/json"
             }
         )
@@ -53,7 +53,7 @@ class QualifireAPIClient:
         assertions: List[str] = None,
         policy_target: str = None
     ) -> Dict[str, Any]:
-        """Call Qualifire evaluation API"""
+        """Call Rogue Security evaluation API"""
 
         payload = {
             "messages": messages,
@@ -80,7 +80,7 @@ class QualifireAPIClient:
         )
 
         if response.status_code != 200:
-            raise Exception(f"Qualifire API error {response.status_code}: {response.text}")
+            raise Exception(f"Rogue Security API error {response.status_code}: {response.text}")
 
         return response.json()
 
@@ -88,16 +88,16 @@ class QualifireAPIClient:
         self.client.close()
 
 
-class QualifireWorkflowStep:
+class RogueWorkflowStep:
     """
-    Qualifire validation step using direct API calls.
+    Rogue Security validation step using direct API calls.
 
     This can be called from Elastic Agent Builder workflows to validate
     agent responses before returning them to users.
     """
 
     def __init__(self, api_key: str):
-        self.client = QualifireAPIClient(api_key=api_key)
+        self.client = RogueAPIClient(api_key=api_key)
 
         # Policy configurations
         self.policies = {
@@ -165,7 +165,7 @@ class QualifireWorkflowStep:
         conversation_history: List[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """
-        Validate an agent response using the Qualifire API with messages format.
+        Validate an agent response using the Rogue Security API with messages format.
         """
 
         policy = self.policies.get(policy_name, self.policies["default"])
@@ -204,11 +204,13 @@ class QualifireWorkflowStep:
             if policy.get("policy_target"):
                 eval_kwargs["policy_target"] = policy["policy_target"]
 
-            # Call Qualifire API with messages format
+            # Call Rogue Security API with messages format
             result = self.client.evaluate(**eval_kwargs)
 
             # Parse results
-            overall_score = result.get("score") or 0
+            # Overall score from API is in 0-100 range, normalize to 0-1 for consistent comparison
+            raw_overall_score = result.get("score") or 0
+            overall_score = raw_overall_score / 100 if raw_overall_score > 1 else raw_overall_score
             failed_checks = []
             check_details = {}
 
@@ -225,17 +227,21 @@ class QualifireWorkflowStep:
                         "reason": check.get("reason", "")
                     })
 
-                    check_score = check.get("score", 0)
-                    if check_score < (policy["confidence_threshold"] * 100) or check.get("flagged", False):
+                    # Only fail if Rogue Security explicitly flags the check
+                    is_flagged = check.get("flagged", False)
+
+                    if is_flagged:
                         failed_checks.append({
                             "check_type": check_type,
                             "name": check.get("name", ""),
-                            "score": check_score,
+                            "score": check.get("score", 0),
+                            "flagged": True,
                             "reason": check.get("reason", "Check failed")
                         })
 
             # Determine validation status
-            passed = len(failed_checks) == 0 and overall_score >= (policy["confidence_threshold"] * 100)
+            # Only block if any check was explicitly flagged by Rogue Security
+            passed = len(failed_checks) == 0
 
             if passed:
                 return {
@@ -295,11 +301,11 @@ class QualifireWorkflowStep:
 
 class ElasticAgentBuilderWorkflowDemo:
     """
-    Demonstrates how Agent Builder workflows would integrate with Qualifire API.
+    Demonstrates how Agent Builder workflows would integrate with Rogue Security API.
     """
 
     def __init__(self):
-        self.qualifire_step = QualifireWorkflowStep(QUALIFIRE_API_KEY)
+        self.rogue_step = RogueWorkflowStep(ROGUE_API_KEY)
 
         # Workflow definitions
         self.workflows = {
@@ -343,7 +349,7 @@ class ElasticAgentBuilderWorkflowDemo:
         conversation_history: List[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """
-        Execute a validation workflow using Qualifire API.
+        Execute a validation workflow using Rogue Security API.
         """
 
         if workflow_name not in self.workflows:
@@ -359,7 +365,7 @@ class ElasticAgentBuilderWorkflowDemo:
         print(f"   Description: {workflow['description']}")
 
         # Execute the validation step using API
-        validation_result = self.qualifire_step.validate_response(
+        validation_result = self.rogue_step.validate_response(
             user_input=user_input,
             agent_response=agent_response,
             policy_name=workflow["policy"],
@@ -396,17 +402,17 @@ class ElasticAgentBuilderWorkflowDemo:
 
 def demo_workflow_integration():
     """
-    Demonstrates different workflow scenarios with Qualifire validation.
+    Demonstrates different workflow scenarios with Rogue Security validation.
     """
 
     demo = ElasticAgentBuilderWorkflowDemo()
 
-    print("Elastic Agent Builder + Qualifire Workflows Integration Demo")
-    print("Using Direct Qualifire API Calls")
+    print("Elastic Agent Builder + Rogue Security Workflows Integration Demo")
+    print("Using Direct Rogue Security API Calls")
     print("=" * 65)
     print()
     print("This demo shows how Agent Builder workflows can integrate with")
-    print("Qualifire safety validation using the direct API.")
+    print("Rogue Security safety validation using the direct API.")
     print()
 
     # Test scenarios
@@ -503,7 +509,7 @@ def demo_workflow_integration():
 
     print("Workflow Integration Summary:")
     print("=" * 40)
-    print("- Uses direct Qualifire API calls")
+    print("- Uses direct Rogue Security API calls")
     print("- Messages format for better context understanding")
     print("- Different workflows for different use cases")
     print("- Configurable policies and thresholds")
@@ -521,9 +527,9 @@ def demo_workflow_integration():
 
 
 if __name__ == "__main__":
-    if not QUALIFIRE_API_KEY:
-        print("Error: QUALIFIRE_API_KEY environment variable not set")
-        print("Please set your Qualifire API key in the .env file")
+    if not ROGUE_API_KEY:
+        print("Error: ROGUE_API_KEY environment variable not set")
+        print("Please set your Rogue Security API key in the .env file")
         exit(1)
 
     try:
